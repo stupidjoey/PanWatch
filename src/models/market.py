@@ -57,7 +57,7 @@ MARKETS: dict[MarketCode, MarketDef] = {
             TradingSession(time(9, 30), time(11, 30)),
             TradingSession(time(13, 0), time(15, 0)),
         ],
-        symbol_pattern=r"^[036]\d{5}$",
+        symbol_pattern=r"^\d{6}$",  # 支持 A 股 + ETF/LOF 等场内基金
     ),
     MarketCode.HK: MarketDef(
         code=MarketCode.HK,
