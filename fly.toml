@@ -1,0 +1,33 @@
+# PanWatch (盯盘侠) - fly.io 部署配置
+# https://github.com/TNT-Likely/PanWatch
+
+app = "stupidjoey-panwatch"
+primary_region = "sin"  # 新加坡节点，亚太区最近
+
+# 从 Git 仓库的 Dockerfile 直接构建（支持 ETF 改动的 fork 版本）
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512  # 不开 Playwright 够用
+
+[env]
+  TZ = "Asia/Shanghai"
+  PLAYWRIGHT_SKIP_BROWSER_INSTALL = "1"  # 默认不开，省内存
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false   # 股票监控需要 7x24 运行
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/"
+
+[mounts]
+  source = "panwatch_data"
+  destination = "/app/data"
