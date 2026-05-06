@@ -21,7 +21,7 @@ EASTMONEY_PARAMS = {
     "fltt": "2",
     "invt": "2",
     "fid": "f12",
-    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:1,m:1+t:1",  # + 深/沪场内基金(ETF/LOF)
     "fields": "f12,f14",
 }
 
@@ -353,8 +353,8 @@ def _realtime_search(query: str, market: str = "", limit: int = 20) -> list[dict
 
         # 判断市场
         if (
-            classify in ("AStock", "BJStock")
-            or any(ch in security_type for ch in ("沪", "深", "北"))
+            classify in ("AStock", "BJStock", "Fund")
+            or any(ch in security_type for ch in ("沪", "深", "北", "基金"))
             or code_raw.endswith(".BJ")
             or code_raw.startswith("BJ")
         ):
@@ -372,7 +372,7 @@ def _realtime_search(query: str, market: str = "", limit: int = 20) -> list[dict
 
         # 只保留股票（排除债券等）
         type_us = item.get("TypeUS", "")
-        if stock_market == "US" and type_us and type_us not in ("1", "2", "3"):  # 1=普通股, 3=ADR/ADS 等；5=ETF 等
+        if stock_market == "US" and type_us and type_us not in ("1", "2", "3", "5"):  # 1=普通股 3=ADR 5=ETF
             continue
 
         code = item.get("Code", "")
