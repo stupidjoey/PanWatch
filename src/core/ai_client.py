@@ -60,9 +60,17 @@ class AIClient:
             messages.append({"role": "user", "content": user_content})
 
         try:
+            # DeepSeek V4 默认开启 thinking 模式,多轮对话需回传 reasoning_content 。
+            # 这里统一关闭 thinking 以避免兼容性问题。
+            extra = {}
+            if "deepseek" in self.model.lower():
+                extra["thinking"] = {"type": "disabled"}
+
             create_kwargs = {"model": self.model, "messages": messages}
             if temperature is not None:
                 create_kwargs["temperature"] = temperature
+            if extra:
+                create_kwargs["extra_body"] = extra
             response = await self.client.chat.completions.create(**create_kwargs)
             # 记录 token 用量
             if response.usage:
@@ -91,10 +99,15 @@ class AIClient:
             temperature: 生成温度
         """
         try:
+            extra = {}
+            if "deepseek" in self.model.lower():
+                extra["thinking"] = {"type": "disabled"}
+
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
+                extra_body=extra if extra else None,
             )
             if response.usage:
                 self.total_tokens_used += response.usage.total_tokens
@@ -115,11 +128,16 @@ class AIClient:
     ):
         """带 tool use 的对话调用，返回原始 message 对象。"""
         try:
+            extra = {}
+            if "deepseek" in self.model.lower():
+                extra["thinking"] = {"type": "disabled"}
+
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=tools,
                 temperature=temperature,
+                extra_body=extra if extra else None,
             )
             if response.usage:
                 self.total_tokens_used += response.usage.total_tokens
