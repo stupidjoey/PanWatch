@@ -9,7 +9,7 @@ primary_region = "sin"  # 新加坡节点，亚太区最近
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 512  # 不开 Playwright 够用
+  memory_mb = 1024  # 512MB OOM，扩展到 1G 给 akshare 和行情数据留余量
 
 [env]
   TZ = "Asia/Shanghai"
