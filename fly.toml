@@ -18,9 +18,9 @@ primary_region = "sin"  # 新加坡节点，亚太区最近
 [http_service]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = false   # 股票监控需要 7x24 运行
-  auto_start_machines = true
-  min_machines_running = 1
+  auto_stop_machines = true    # 盘后自动关机省成本
+  auto_start_machines = true   # 有请求时自动唤醒（用作兜底）
+  min_machines_running = 0
 
   [[http_service.checks]]
     interval = "30s"
