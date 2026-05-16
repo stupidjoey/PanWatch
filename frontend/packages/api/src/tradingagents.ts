@@ -85,13 +85,49 @@ export interface ProgressResponse {
   }
 }
 
+export interface BudgetInfo {
+  used: number
+  remaining: number
+  limit: number
+  exceeded: boolean
+  runs_this_month: number
+  estimate_next_run: {
+    cost_low_usd: number
+    cost_high_usd: number
+    model: string
+  }
+  over_budget_action: 'reject' | 'warn' | 'continue'
+  enabled: boolean
+}
+
 export const tradingAgentsApi = {
-  /** 触发深度分析(异步排队)。 */
-  trigger(stockId: number): Promise<TradingAgentsTriggerResult> {
-    return fetchAPI(`/stocks/${stockId}/agents/tradingagents/trigger`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    })
+  /** 触发深度分析(异步排队)。force=true 跳过同日缓存。
+   *  TradingAgents 不要求 StockAgent 绑定 — 始终带 allow_unbound=true。 */
+  trigger(stockId: number, opts: { force?: boolean } = {}): Promise<TradingAgentsTriggerResult> {
+    const qsParts = ['allow_unbound=true']
+    if (opts.force) qsParts.push('force_refresh=true')
+    return fetchAPI(
+      `/stocks/${stockId}/agents/tradingagents/trigger?${qsParts.join('&')}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      },
+    )
+  },
+
+  /** 读取本月预算 + 单次预估成本(用于触发前确认弹窗)。 */
+  getBudget(): Promise<BudgetInfo> {
+    return fetchAPI('/agents/tradingagents/budget')
+  },
+
+  /** 查某只股票最近 30 分钟有没有在跑或刚完成的 TA 任务(后端权威源)。
+   *  返回 status: running | success | failed | none */
+  findRunning(symbol: string): Promise<{
+    trace_id: string | null
+    status: 'running' | 'success' | 'failed' | 'none'
+    last_activity_at?: string
+  }> {
+    return fetchAPI(`/agents/tradingagents/running?stock_symbol=${encodeURIComponent(symbol)}`)
   },
 
   /** 拉取进度(前端轮询)。 */
@@ -99,21 +135,20 @@ export const tradingAgentsApi = {
     return fetchAPI(`/agents/runs/${encodeURIComponent(traceId)}/progress`)
   },
 
-  /** 拉取最近的深度分析历史(走通用 history 接口)。 */
+  /** 拉取某只股票最近一次深度分析结果(含完整 raw_data)。 */
   getLatestForStock(symbol: string): Promise<DeepAnalysisResult | null> {
     return fetchAPI(
-      `/history?agent_name=tradingagents&stock_symbol=${encodeURIComponent(symbol)}&limit=1`,
-    ).then((items: unknown) => {
-      if (Array.isArray(items) && items.length > 0) {
-        const item = items[0] as { content: string; title: string; raw_data: unknown }
-        return {
-          agent_name: 'tradingagents',
-          title: item.title,
-          content: item.content,
-          raw_data: item.raw_data as DeepAnalysisResult['raw_data'],
-        }
+      `/agents/tradingagents/latest?stock_symbol=${encodeURIComponent(symbol)}`,
+    ).then((item: unknown) => {
+      if (!item || typeof item !== 'object') return null
+      const rec = item as { content?: string; title?: string; raw_data?: unknown }
+      if (!rec.content) return null
+      return {
+        agent_name: 'tradingagents',
+        title: rec.title || '',
+        content: rec.content || '',
+        raw_data: (rec.raw_data || {}) as DeepAnalysisResult['raw_data'],
       }
-      return null
     })
   },
 }

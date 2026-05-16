@@ -13,6 +13,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import {
   tradingAgentsApi,
+  type BudgetInfo,
   type DeepAnalysisResult,
   type ProgressResponse,
   type ProgressStage,
@@ -37,6 +38,46 @@ const DECISION_COLOR: Record<string, string> = {
 }
 
 const POLL_INTERVAL_MS = 2000
+
+/** localStorage 里记录某只股票最近一次触发的 trace_id;关闭重开弹窗时恢复 polling */
+const STORAGE_KEY_PREFIX = 'panwatch:tradingagents:running:'
+/** trace_id 持续多久后认为可能已不再运行(避免显示过期 trace 的 idle) */
+const TRACE_MAX_AGE_MS = 20 * 60 * 1000  // 20 分钟
+
+function loadRunningTrace(stockSymbol: string): string | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + stockSymbol)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { traceId: string; startedAt: number }
+    if (!parsed.traceId || !parsed.startedAt) return null
+    if (Date.now() - parsed.startedAt > TRACE_MAX_AGE_MS) {
+      localStorage.removeItem(STORAGE_KEY_PREFIX + stockSymbol)
+      return null
+    }
+    return parsed.traceId
+  } catch {
+    return null
+  }
+}
+
+function saveRunningTrace(stockSymbol: string, traceId: string): void {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + stockSymbol,
+      JSON.stringify({ traceId, startedAt: Date.now() }),
+    )
+  } catch {
+    /* 忽略 quota 等错误 */
+  }
+}
+
+function clearRunningTrace(stockSymbol: string): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY_PREFIX + stockSymbol)
+  } catch {
+    /* ignore */
+  }
+}
 
 export interface DeepAnalysisModalProps {
   open: boolean
@@ -64,6 +105,7 @@ export function DeepAnalysisModal({
   const [error, setError] = useState<string>('')
   const [showAnalystDetails, setShowAnalystDetails] = useState(false)
   const [showDebate, setShowDebate] = useState(false)
+  const [budget, setBudget] = useState<BudgetInfo | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // 弹窗关闭时清理 polling
@@ -76,21 +118,74 @@ export function DeepAnalysisModal({
     }
   }, [open])
 
-  // 重置初始状态
+  // 重置初始状态 + 后端查询是否有正在跑/已完成的任务
   useEffect(() => {
-    if (open) {
-      if (initialResult) {
-        setResult(initialResult)
-        setStage('done')
-      } else {
-        setStage('idle')
-        setResult(null)
-        setError('')
-        setProgress(null)
-        setTraceId(null)
-      }
+    if (!open) return
+
+    if (initialResult) {
+      setResult(initialResult)
+      setStage('done')
+      return
     }
-  }, [open, initialResult])
+
+    // 先重置为 idle (避免上次 state 残留),然后异步查后端
+    setStage('idle')
+    setResult(null)
+    setError('')
+    setProgress(null)
+    setTraceId(null)
+
+    // 并发查 3 个数据:
+    //   - findRunning:这只股票最近 30 分钟有没有运行中的任务
+    //   - getLatestForStock:有没有当日已完成的结果(过 30 分钟也算)
+    //   - getBudget:本月预算(idle 状态展示)
+    // 优先级:running > done(已有结果)> idle
+    Promise.all([
+      tradingAgentsApi.findRunning(stockSymbol).catch(() => ({ trace_id: null, status: 'none' as const })),
+      tradingAgentsApi.getLatestForStock(stockSymbol).catch(() => null),
+      tradingAgentsApi.getBudget().catch(() => null),
+    ]).then(([runningInfo, latestResult, budgetInfo]) => {
+      setBudget(budgetInfo)
+
+      // 1) 优先:有正在跑的任务 → 进入 running
+      if (runningInfo.status === 'running' && runningInfo.trace_id) {
+        const tid = runningInfo.trace_id
+        setTraceId(tid)
+        setStage('running')
+        tradingAgentsApi.getProgress(tid).then(resp => setProgress(resp))
+        if (timerRef.current) clearInterval(timerRef.current)
+        timerRef.current = setInterval(() => pollProgress(tid), POLL_INTERVAL_MS)
+        return
+      }
+
+      // 2) localStorage 兜底:任务刚触发可能还没写 log(后端 findRunning 暂时查不到)
+      if (runningInfo.status === 'none') {
+        const localTrace = loadRunningTrace(stockSymbol)
+        if (localTrace) {
+          setTraceId(localTrace)
+          setStage('running')
+          tradingAgentsApi.getProgress(localTrace).then(resp => setProgress(resp))
+          if (timerRef.current) clearInterval(timerRef.current)
+          timerRef.current = setInterval(() => pollProgress(localTrace), POLL_INTERVAL_MS)
+          return
+        }
+      }
+
+      // 3) 有当日已完成结果 → 直接展示(DoneView 会显示「当日缓存」标签 + 重新分析按钮)
+      if (latestResult) {
+        // 标记成缓存(避免用户误以为是刚跑出来的实时结果)
+        latestResult.raw_data.from_cache = true
+        setResult(latestResult)
+        setStage('done')
+        clearRunningTrace(stockSymbol)
+        return
+      }
+
+      // 4) 都没有 → idle 状态(默认)
+      clearRunningTrace(stockSymbol)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialResult, stockSymbol])
 
   const pollProgress = useCallback(
     async (tid: string) => {
@@ -103,6 +198,7 @@ export function DeepAnalysisModal({
             clearInterval(timerRef.current)
             timerRef.current = null
           }
+          clearRunningTrace(stockSymbol)
           const latest = await tradingAgentsApi.getLatestForStock(stockSymbol)
           if (latest) {
             setResult(latest)
@@ -116,6 +212,7 @@ export function DeepAnalysisModal({
             clearInterval(timerRef.current)
             timerRef.current = null
           }
+          clearRunningTrace(stockSymbol)
           setError(resp.run?.error || '分析失败')
           setStage('error')
         }
@@ -127,12 +224,12 @@ export function DeepAnalysisModal({
     [stockSymbol],
   )
 
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(async (force = false) => {
     setStage('running')
     setError('')
     setProgress(null)
     try {
-      const triggerResp = await tradingAgentsApi.trigger(stockId)
+      const triggerResp = await tradingAgentsApi.trigger(stockId, { force })
       const tid = triggerResp.trace_id || ''
       setTraceId(tid)
       if (!tid) {
@@ -141,6 +238,8 @@ export function DeepAnalysisModal({
         toast(triggerResp.message || '已触发', 'success')
         return
       }
+      // 持久化 trace_id 让关闭重开能恢复进度
+      saveRunningTrace(stockSymbol, tid)
       // 启动 polling
       timerRef.current = setInterval(() => {
         pollProgress(tid)
@@ -151,7 +250,7 @@ export function DeepAnalysisModal({
       setStage('error')
       setError(e instanceof Error ? e.message : '触发失败')
     }
-  }, [stockId, pollProgress, toast])
+  }, [stockId, stockSymbol, pollProgress, toast])
 
   const handleClose = useCallback(() => {
     if (timerRef.current) {
@@ -176,7 +275,8 @@ export function DeepAnalysisModal({
         {stage === 'idle' && (
           <IdleView
             stockSymbol={stockSymbol}
-            onStart={handleStart}
+            budget={budget}
+            onStart={() => handleStart(false)}
             onCancel={handleClose}
           />
         )}
@@ -191,6 +291,7 @@ export function DeepAnalysisModal({
           setShowAnalystDetails={setShowAnalystDetails}
           showDebate={showDebate}
           setShowDebate={setShowDebate}
+          onRerun={() => handleStart(true)}
         />}
 
         {stage === 'error' && (
@@ -201,7 +302,7 @@ export function DeepAnalysisModal({
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={handleClose}>关闭</Button>
-              <Button onClick={handleStart}>重试</Button>
+              <Button onClick={() => handleStart(false)}>重试</Button>
             </div>
           </div>
         )}
@@ -212,13 +313,17 @@ export function DeepAnalysisModal({
 
 function IdleView({
   stockSymbol,
+  budget,
   onStart,
   onCancel,
 }: {
   stockSymbol: string
+  budget: BudgetInfo | null
   onStart: () => void
   onCancel: () => void
 }) {
+  const overBudget = budget?.exceeded && budget.over_budget_action === 'reject'
+  const est = budget?.estimate_next_run
   return (
     <div className="space-y-4 text-[13px]">
       <div className="rounded-lg bg-accent/30 p-3 space-y-1.5">
@@ -226,15 +331,38 @@ function IdleView({
         <div className="text-muted-foreground">
           调用 4 类分析师(技术 / 情绪 / 新闻 / 基本面) + 看多看空辩论 + 风控 + PM 整合
         </div>
-        <div className="text-[11px] text-muted-foreground mt-2">
-          ⏱ 预计耗时:3-5 分钟<br />
-          💰 预估成本:$0.02 - $0.05 (deepseek-chat)<br />
-          ℹ️ 异步执行,可关闭弹窗,完成时通过通知渠道推送
+        <div className="text-[11px] text-muted-foreground mt-2 space-y-0.5">
+          <div>⏱ 预计耗时:3-8 分钟</div>
+          {est ? (
+            <div>💰 预估成本:${est.cost_low_usd.toFixed(2)} - ${est.cost_high_usd.toFixed(2)} ({est.model})</div>
+          ) : (
+            <div>💰 预估成本:加载中...</div>
+          )}
+          <div>ℹ️ 异步执行,可关闭弹窗,完成时通过通知渠道推送</div>
         </div>
       </div>
+
+      {/* 本月预算 */}
+      {budget && (
+        <div className={`rounded-lg p-3 text-[12px] ${overBudget ? 'bg-rose-500/10 border border-rose-500/30' : 'bg-accent/20'}`}>
+          <div className="flex items-center justify-between">
+            <span className="font-medium">本月预算</span>
+            <span className={overBudget ? 'text-rose-600' : 'text-muted-foreground'}>
+              ${budget.used.toFixed(2)} / ${budget.limit.toFixed(2)}
+              {budget.runs_this_month > 0 && ` · ${budget.runs_this_month} 次`}
+            </span>
+          </div>
+          {overBudget && (
+            <div className="text-[11px] text-rose-600 mt-1">
+              ⚠️ 本月预算已用尽。如需继续,请到「设置 → Agent → TradingAgents」调高 `monthly_budget_usd`。
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onCancel}>取消</Button>
-        <Button onClick={onStart}>开始分析</Button>
+        <Button onClick={onStart} disabled={overBudget}>开始分析</Button>
       </div>
     </div>
   )
@@ -312,23 +440,40 @@ function DoneView({
   setShowAnalystDetails,
   showDebate,
   setShowDebate,
+  onRerun,
 }: {
   result: DeepAnalysisResult
   showAnalystDetails: boolean
   setShowAnalystDetails: (v: boolean) => void
   showDebate: boolean
   setShowDebate: (v: boolean) => void
+  onRerun: () => void
 }) {
-  const sug = result.raw_data.suggestion
-  const reports = result.raw_data.analyst_reports || {}
-  const debate = result.raw_data.debate_history
-  const fromCache = result.raw_data.from_cache
+  // 防御性默认值:后端拉历史时可能 raw_data 缺失,这里给完整 fallback 避免白屏
+  const rawData = (result?.raw_data || {}) as Partial<DeepAnalysisResult['raw_data']>
+  const sug = rawData.suggestion || {
+    action: 'hold' as const,
+    action_label: '持有',
+    signal: '',
+    reason: '',
+    should_alert: false,
+    agent_name: 'tradingagents',
+    agent_label: 'TradingAgents 深度',
+    confidence: 5.0,
+  }
+  const reports = rawData.analyst_reports || { market: '', social: '', news: '', fundamentals: '' }
+  const debate = rawData.debate_history
+  const fromCache = rawData.from_cache
+  const costUsd = rawData.cost_usd
 
   return (
     <div className="space-y-4 text-[13px]">
       {fromCache && (
-        <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-2 text-[12px] text-amber-700 dark:text-amber-400">
-          ℹ️ 当日缓存:今天已经分析过这只股票,展示缓存结果(无新成本)
+        <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-2 text-[12px] text-amber-700 dark:text-amber-400 flex items-center justify-between">
+          <span>ℹ️ 当日缓存:今天已经分析过这只股票,展示缓存结果(无新成本)</span>
+          <Button variant="outline" size="sm" onClick={onRerun} className="ml-3 h-7 text-[11px]">
+            忽略缓存重新分析
+          </Button>
         </div>
       )}
 
@@ -344,7 +489,7 @@ function DoneView({
         </div>
         <div className="text-[12px] text-foreground/80">{sug.reason?.slice(0, 200)}</div>
         <div className="flex items-center gap-3 text-[10px] text-muted-foreground mt-2">
-          <span>成本:${result.raw_data.cost_usd?.toFixed(4) ?? '-'}</span>
+          <span>成本:${costUsd?.toFixed(4) ?? '-'}</span>
         </div>
       </div>
 

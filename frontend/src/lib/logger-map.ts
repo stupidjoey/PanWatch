@@ -7,6 +7,18 @@ export const LOGGER_MAPPING: Record<string, string> = {
   'src.agents.base': 'Agent执行链路',
   'src.agents.news_digest': '新闻速递',
   'src.agents.chart_analyst': '技术分析',
+  'src.agents.tradingagents': '深度分析',
+  'src.agents.tradingagents.agent': '深度分析-主流程',
+  'src.agents.tradingagents.progress': '深度分析-进度',
+  'src.agents.tradingagents.portfolio_context': '深度分析-持仓上下文',
+  'src.agents.tradingagents.toolkit_adapter': '深度分析-数据适配',
+  'src.agents.tradingagents.paper_trading_bridge': '深度分析-模拟盘',
+  'src.agents.tradingagents.cost_tracker': '深度分析-成本',
+  'src.agents.tradingagents.llm_adapter': '深度分析-LLM',
+  'src.agents.tradingagents.langchain_compat': '深度分析-兼容层',
+  'src.agents.tradingagents.backfill': '深度分析-回填',
+  'src.agents.tradingagents.result_mapper': '深度分析-结果映射',
+  'tradingagents': '深度分析(上游)',
 
   // Core
   'src.core.scheduler': '调度器',

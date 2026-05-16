@@ -26,6 +26,10 @@ from src.agents.tradingagents.llm_adapter import (
     build_ta_llm_config,
     inject_api_key_env,
 )
+from src.agents.tradingagents.portfolio_context import (
+    build_portfolio_context,
+    patch_propagator,
+)
 from src.agents.tradingagents.progress import PanWatchProgressHandler
 from src.agents.tradingagents.result_mapper import map_state_to_result
 from src.agents.tradingagents.toolkit_adapter import (
@@ -54,6 +58,10 @@ class TradingAgentsAgent(BaseAgent):
         over_budget_action: str = "reject",  # reject / warn / continue
         cache_ttl_hours: int = 12,
         output_language: str = "Chinese",
+        deep_model: str | None = None,    # 推理/辩论/PM 用的强模型 (留空走默认)
+        quick_model: str | None = None,   # 分析师工具调用用的快模型 (留空 = deep_model)
+        timeout_minutes: int = 15,        # 整个流程硬超时;default 15 min 防卡死
+        emit_paper_trading_signal: bool = False,  # 是否把 BUY 决策写入 StrategySignalRun 驱动模拟盘
     ):
         # 校验分析师配置
         analysts = list(analyst_types or sorted(VALID_ANALYSTS))
@@ -70,6 +78,10 @@ class TradingAgentsAgent(BaseAgent):
         self.over_budget_action = over_budget_action
         self.cache_ttl_hours = max(0, int(cache_ttl_hours))
         self.output_language = output_language
+        self.deep_model = (deep_model or "").strip() or None
+        self.quick_model = (quick_model or "").strip() or None
+        self.timeout_minutes = max(1, int(timeout_minutes))
+        self.emit_paper_trading_signal = bool(emit_paper_trading_signal)
 
         # 软依赖检测
         self._available, self._import_error = self._check_availability()
@@ -127,6 +139,31 @@ class TradingAgentsAgent(BaseAgent):
         # BaseAgent 抽象要求,但本 agent 不走单次 prompt
         return "", ""
 
+    async def run_single(self, context: AgentContext, symbol: str) -> AnalysisResult:
+        """单只股票模式入口 — 供 AgentScheduler 调度时按股票迭代调用。
+
+        典型场景:盘前自动跑用户绑定到 tradingagents 的核心仓位股票。
+        实现:过滤 watchlist 到指定 symbol,然后走标准 run() 流程。
+        """
+        # 找到目标 stock
+        targets = [s for s in context.watchlist if s.symbol == symbol]
+        if not targets:
+            raise ValueError(
+                f"run_single: symbol={symbol} 不在 watchlist 中,跳过"
+            )
+
+        # 浅克隆 context.config 让 watchlist 只剩目标股票,其他字段不变
+        from copy import copy
+        from src.config import AppConfig
+
+        narrow_config = AppConfig(
+            settings=context.config.settings,
+            watchlist=targets,
+        )
+        narrow_context = copy(context)
+        narrow_context.config = narrow_config
+        return await self.run(narrow_context)
+
     # ---- 重写 analyze:走 TradingAgents 多 Agent 流 ----
 
     async def analyze(self, context: AgentContext, data: dict) -> AnalysisResult:
@@ -135,15 +172,17 @@ class TradingAgentsAgent(BaseAgent):
 
         stock = data["stock"]
         trace_id = getattr(context, "_trace_id", "") or self._make_trace_id(stock.symbol)
+        force_refresh = bool(getattr(context, "_force_refresh", False))
 
-        # 0) 同日缓存命中
-        cached = self._try_cache_hit(stock)
-        if cached is not None:
-            logger.info(
-                f"[TA] 命中同日缓存 (agent=tradingagents symbol={stock.symbol})"
-            )
-            cached.raw_data["from_cache"] = True
-            return cached
+        # 0) 同日缓存命中(force_refresh=True 时跳过)
+        if not force_refresh:
+            cached = self._try_cache_hit(stock)
+            if cached is not None:
+                logger.info(
+                    f"[TA] 命中同日缓存 (agent=tradingagents symbol={stock.symbol})"
+                )
+                cached.raw_data["from_cache"] = True
+                return cached
 
         # 1) 预算检查
         budget = check_budget(self.monthly_budget_usd, self.name)
@@ -160,27 +199,57 @@ class TradingAgentsAgent(BaseAgent):
                     f"(${budget['used']:.2f} / ${self.monthly_budget_usd:.2f})"
                 )
 
-        # 2) 构造 TradingAgents config
+        # 2) 构造 TradingAgents config (支持 deep / quick 双模型)
         ta_config = build_ta_llm_config(
             context.ai_client,
             debate_rounds=self.debate_rounds,
             selected_analysts=self.analyst_types,
             output_language=self.output_language,
+            deep_model=self.deep_model,
+            quick_model=self.quick_model,
         )
 
         # 3) 进度回调
         progress_handler = PanWatchProgressHandler(trace_id, self.name)
 
-        # 4) 同步阻塞,丢到线程池
-        ta_result = await asyncio.to_thread(
-            self._run_tradingagents_sync,
-            ai_client=context.ai_client,
-            symbol=stock.symbol,
-            market=stock.market.value,
-            ta_config=ta_config,
-            progress_handler=progress_handler,
-            panwatch_data=data,
+        # 4) 渲染用户持仓上下文(注入到 TA 的 past_context 通道,给 PM 看)
+        current_price = (data.get("quote") or {}).get("current_price")
+        portfolio_context_text = build_portfolio_context(
+            getattr(context, "portfolio", None),
+            stock_symbol=stock.symbol,
+            current_price=current_price if isinstance(current_price, (int, float)) else None,
         )
+
+        # 5) 同步阻塞,丢到线程池;加硬超时防卡死
+        try:
+            ta_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._run_tradingagents_sync,
+                    ai_client=context.ai_client,
+                    symbol=stock.symbol,
+                    market=stock.market.value,
+                    ta_config=ta_config,
+                    progress_handler=progress_handler,
+                    panwatch_data=data,
+                    portfolio_context_text=portfolio_context_text,
+                ),
+                timeout=self.timeout_minutes * 60,
+            )
+        except asyncio.TimeoutError:
+            # 超时:尝试落库部分进度供后续查看
+            partial_cost = getattr(progress_handler, "_total_cost", 0.0)
+            partial_stages = list(getattr(progress_handler, "_completed_stages", set()))
+            logger.warning(
+                f"[TA] 执行超时 (>{self.timeout_minutes} 分钟). "
+                f"已完成阶段: {partial_stages}, 累计成本 ${partial_cost:.4f}"
+            )
+            partial_msg = (
+                f"分析超时(>{self.timeout_minutes} 分钟)。"
+                f"已完成 {len(partial_stages)} 个阶段,累计成本 ${partial_cost:.4f}。"
+                f"建议:① 缩短 debate_rounds;② 换更快的模型(如 deepseek-chat);"
+                f"③ 调高 timeout_minutes。"
+            )
+            raise RuntimeError(partial_msg)
 
         # 5) 映射成 AnalysisResult
         result = map_state_to_result(
@@ -201,6 +270,65 @@ class TradingAgentsAgent(BaseAgent):
             )
         except Exception as e:
             logger.warning(f"[TA] save_analysis 失败,不影响主流程: {e}")
+
+        # 6b) 落库到 StockSuggestion(建议池) — 让持仓页/关注列表上的建议徽章
+        # 显示 TradingAgents 的 BUY/HOLD/SELL 决策(跟「盘前分析」「收盘复盘」并列)。
+        try:
+            from src.core.suggestion_pool import save_suggestion
+
+            sug = result.raw_data.get("suggestion") or {}
+            action = (sug.get("action") or "hold").lower()
+            action_label = sug.get("action_label") or "持有"
+            signal_text = (sug.get("signal") or "")[:500]
+            reason_text = (sug.get("reason") or "")[:1000]
+            confidence = sug.get("confidence")
+            confidence_text = (
+                f" (置信度 {confidence:.1f}/10)" if isinstance(confidence, (int, float)) else ""
+            )
+
+            save_suggestion(
+                stock_symbol=stock.symbol,
+                stock_name=stock.name,
+                stock_market=stock.market.value,
+                action=action,
+                action_label=f"{action_label}{confidence_text}",
+                agent_name=self.name,
+                agent_label="TradingAgents 深度",
+                signal=signal_text,
+                reason=reason_text,
+                expires_hours=24,  # 深度分析结果 24 小时内有效
+                ai_response=result.content[:2000],
+                meta={
+                    "cost_usd": result.raw_data.get("cost_usd", 0),
+                    "decision": result.raw_data.get("decision", "HOLD"),
+                    "confidence": confidence,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[TA] save_suggestion 失败,不影响主流程: {e}")
+
+        # 7) 可选:把 BUY/SELL 决策写入 StrategySignalRun 驱动模拟盘
+        if self.emit_paper_trading_signal:
+            try:
+                from src.agents.tradingagents.paper_trading_bridge import (
+                    maybe_emit_paper_trading_signal,
+                )
+                quote = data.get("quote") or {}
+                current_price = quote.get("current_price")
+                sug = result.raw_data.get("suggestion") or {}
+                maybe_emit_paper_trading_signal(
+                    stock_symbol=stock.symbol,
+                    stock_market=stock.market.value,
+                    stock_name=stock.name,
+                    decision=str(sug.get("action") or ""),
+                    confidence=float(sug.get("confidence") or 5.0),
+                    signal_text=str(sug.get("signal") or ""),
+                    reason=str(sug.get("reason") or ""),
+                    current_price=current_price,
+                    enabled=True,
+                )
+            except Exception as e:
+                logger.warning(f"[TA] 写模拟盘信号失败,不影响主流程: {e}")
 
         return result
 
@@ -255,6 +383,7 @@ class TradingAgentsAgent(BaseAgent):
         ta_config: dict,
         progress_handler,
         panwatch_data: dict,
+        portfolio_context_text: str = "",
     ) -> dict[str, Any]:
         """在 worker 线程跑同步 TradingAgents 流程。
 
@@ -286,6 +415,10 @@ class TradingAgentsAgent(BaseAgent):
             # 不会触发 on_chain_start/end → 进度条永远卡 pending)
             if progress_handler is not None:
                 self._inject_graph_callbacks(graph, progress_handler)
+
+            # 注入用户持仓上下文到 past_context(上游官方扩展通道,PM 节点会读)
+            if portfolio_context_text:
+                patch_propagator(graph, portfolio_context_text)
 
             date_str = datetime.now().strftime("%Y-%m-%d")
             try:

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Copy, Download, ExternalLink, RefreshCw, Share2, Sparkles } from 'lucide-react'
-import { insightApi, stocksApi } from '@panwatch/api'
+import { insightApi, stocksApi, tradingAgentsApi, type DeepAnalysisResult } from '@panwatch/api'
 import { getMarketBadge } from '@panwatch/biz-ui'
 import { useLocalStorage } from '@/lib/utils'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
@@ -103,7 +103,7 @@ interface PortfolioSummaryResponse {
   }>
 }
 
-type InsightTab = 'overview' | 'kline' | 'suggestions' | 'news' | 'announcements' | 'reports'
+type InsightTab = 'overview' | 'kline' | 'suggestions' | 'news' | 'announcements' | 'reports' | 'deep'
 
 interface StockAgentInfo {
   agent_name: string
@@ -360,6 +360,11 @@ export default function StockInsightModal(props: {
   const [announcements, setAnnouncements] = useState<NewsItem[]>([])
   const [reports, setReports] = useState<HistoryRecord[]>([])
   const [reportTab, setReportTab] = useState<'premarket_outlook' | 'daily_report' | 'news_digest'>('premarket_outlook')
+  const [deepResult, setDeepResult] = useState<DeepAnalysisResult | null>(null)
+  const [deepLoading, setDeepLoading] = useState(false)
+  const [deepLoaded, setDeepLoaded] = useState(false)
+  const [deepShowAnalyst, setDeepShowAnalyst] = useState(false)
+  const [deepShowDebate, setDeepShowDebate] = useState(false)
   const [klineInterval] = useState<'1d' | '1w' | '1m'>('1d')
   const [alerting, setAlerting] = useState(false)
   const [watchingStock, setWatchingStock] = useState<StockItem | null>(null)
@@ -690,6 +695,20 @@ export default function StockInsightModal(props: {
     await Promise.allSettled(tasks)
   }, [symbol, tab, loadQuote, loadHoldingAgg, loadKline, loadMiniKline, loadSuggestions, loadNews, loadAnnouncements, loadReports])
 
+  const loadDeepResult = useCallback(async () => {
+    if (!symbol) return
+    setDeepLoading(true)
+    try {
+      const res = await tradingAgentsApi.getLatestForStock(symbol)
+      setDeepResult(res)
+    } catch {
+      setDeepResult(null)
+    } finally {
+      setDeepLoaded(true)
+      setDeepLoading(false)
+    }
+  }, [symbol])
+
   useEffect(() => {
     if (!props.open || !symbol) return
     setTab('overview')
@@ -699,8 +718,18 @@ export default function StockInsightModal(props: {
     setReports([])
     setMiniKlines([])
     setWatchingStock(null)
+    setDeepResult(null)
+    setDeepLoaded(false)
     loadCore()
   }, [props.open, symbol, market, loadCore])
+
+  // 切到「深度」tab 时按需拉取(仅首次)
+  useEffect(() => {
+    if (!props.open || !symbol) return
+    if (tab === 'deep' && !deepLoaded && !deepLoading) {
+      loadDeepResult()
+    }
+  }, [tab, props.open, symbol, deepLoaded, deepLoading, loadDeepResult])
 
   useEffect(() => {
     if (!props.open || !symbol) return
@@ -1278,6 +1307,7 @@ export default function StockInsightModal(props: {
                     window.dispatchEvent(new CustomEvent('panwatch-open-chat', {
                       detail: { symbol, market, stockName: resolvedName, pageContext: buildPageContext() }
                     }))
+                    props.onOpenChange(false)
                   }}
                 >
                   <Sparkles className="w-3.5 h-3.5 mr-1" /> 问 AI
@@ -1318,6 +1348,7 @@ export default function StockInsightModal(props: {
                   window.dispatchEvent(new CustomEvent('panwatch-open-chat', {
                     detail: { symbol, market, stockName: resolvedName, pageContext: buildPageContext() }
                   }))
+                  props.onOpenChange(false)
                 }}
               >
                 <Sparkles className="w-3.5 h-3.5 mr-1" /> 问 AI
@@ -1334,6 +1365,7 @@ export default function StockInsightModal(props: {
                 { id: 'overview', label: '概览' },
                 { id: 'suggestions', label: `建议 (${suggestions.length})` },
                 { id: 'reports', label: `报告 (${reports.length})` },
+                { id: 'deep', label: deepResult ? '深度 (1)' : '深度' },
                 { id: 'kline', label: 'K线' },
                 { id: 'announcements', label: `公告 (${announcements.length})` },
                 { id: 'news', label: `新闻 (${news.length})` },
@@ -1684,6 +1716,19 @@ export default function StockInsightModal(props: {
               </div>
             )}
 
+            {tab === 'deep' && (
+              <DeepAnalysisSection
+                loading={deepLoading}
+                loaded={deepLoaded}
+                result={deepResult}
+                showAnalyst={deepShowAnalyst}
+                setShowAnalyst={setDeepShowAnalyst}
+                showDebate={deepShowDebate}
+                setShowDebate={setDeepShowDebate}
+                onRefresh={loadDeepResult}
+              />
+            )}
+
             {tab === 'suggestions' && (
               <div className="space-y-3">
                 <div className="card p-3 flex items-center justify-between gap-3">
@@ -1807,5 +1852,155 @@ export default function StockInsightModal(props: {
       </Dialog>
 
     </>
+  )
+}
+
+const DEEP_DECISION_COLOR: Record<string, string> = {
+  buy: 'text-emerald-600 dark:text-emerald-400',
+  hold: 'text-amber-600 dark:text-amber-400',
+  sell: 'text-rose-600 dark:text-rose-400',
+}
+
+const DEEP_STAGE_LABEL: Record<string, string> = {
+  market: '技术分析师',
+  social: '情绪分析师',
+  news: '新闻分析师',
+  fundamentals: '基本面分析师',
+}
+
+function DeepAnalysisSection({
+  loading,
+  loaded,
+  result,
+  showAnalyst,
+  setShowAnalyst,
+  showDebate,
+  setShowDebate,
+  onRefresh,
+}: {
+  loading: boolean
+  loaded: boolean
+  result: DeepAnalysisResult | null
+  showAnalyst: boolean
+  setShowAnalyst: (v: boolean) => void
+  showDebate: boolean
+  setShowDebate: (v: boolean) => void
+  onRefresh: () => void
+}) {
+  if (loading && !loaded) {
+    return (
+      <div className="card p-6 text-center text-[12px] text-muted-foreground">
+        <span className="inline-block w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin mr-2 align-middle" />
+        正在加载深度分析报告...
+      </div>
+    )
+  }
+  if (!result) {
+    return (
+      <div className="card p-6 text-center text-[12px] text-muted-foreground space-y-2">
+        <div>暂无深度分析报告</div>
+        <div className="text-[11px] text-muted-foreground/70">
+          可在持仓 / 自选页点击 🧠 深度分析按钮触发
+        </div>
+      </div>
+    )
+  }
+
+  const rawData = (result.raw_data || {}) as Partial<DeepAnalysisResult['raw_data']>
+  const sug = rawData.suggestion
+  const reports = rawData.analyst_reports || { market: '', social: '', news: '', fundamentals: '' }
+  const debate = rawData.debate_history
+  const costUsd = rawData.cost_usd
+
+  return (
+    <div className="space-y-3 text-[13px]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] text-muted-foreground">
+          TradingAgents 深度{result.timestamp ? ` · ${result.timestamp.slice(0, 16).replace('T', ' ')}` : ''}
+        </div>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={onRefresh} disabled={loading}>
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+        </Button>
+      </div>
+
+      {sug && (
+        <div className="rounded-lg bg-accent/30 p-4 space-y-2">
+          <div className="flex items-center gap-3">
+            <span className={`text-[20px] font-bold ${DEEP_DECISION_COLOR[sug.action] || ''}`}>
+              {sug.action_label}
+            </span>
+            {typeof sug.confidence === 'number' && (
+              <span className="text-[12px] text-muted-foreground">
+                置信度 {sug.confidence.toFixed(1)} / 10
+              </span>
+            )}
+          </div>
+          {sug.reason && <div className="text-[12px] text-foreground/80">{sug.reason.slice(0, 240)}</div>}
+          {typeof costUsd === 'number' && (
+            <div className="text-[10px] text-muted-foreground mt-2">成本:${costUsd.toFixed(4)}</div>
+          )}
+        </div>
+      )}
+
+      {result.content && (
+        <div className="rounded-lg border border-border/50 p-4">
+          <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+            <ReactMarkdown>{result.content}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <button
+          className="text-[12px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+          onClick={() => setShowAnalyst(!showAnalyst)}
+        >
+          {showAnalyst ? '▼' : '▶'} 4 位分析师报告
+        </button>
+        {showAnalyst && (
+          <div className="space-y-3 mt-2 pl-3 border-l-2 border-border/40">
+            {(['market', 'social', 'news', 'fundamentals'] as const).map((k) => {
+              const text = (reports as unknown as Record<string, string>)[k] || ''
+              if (!text) return null
+              return (
+                <details key={k} open className="text-[12px]">
+                  <summary className="font-medium cursor-pointer">{DEEP_STAGE_LABEL[k] || k}</summary>
+                  <div className="mt-2 text-[11px] text-foreground/80 whitespace-pre-wrap">
+                    {text.slice(0, 1500)}
+                    {text.length > 1500 && '... (截断)'}
+                  </div>
+                </details>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {debate && debate.history && (
+        <div>
+          <button
+            className="text-[12px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+            onClick={() => setShowDebate(!showDebate)}
+          >
+            {showDebate ? '▼' : '▶'} 看多看空辩论
+          </button>
+          {showDebate && (
+            <div className="mt-2 pl-3 border-l-2 border-border/40 text-[11px] text-foreground/80 whitespace-pre-wrap max-h-96 overflow-y-auto">
+              {debate.history}
+              {debate.judge_decision && (
+                <>
+                  <div className="font-medium mt-3 mb-1">研究主管裁决:</div>
+                  <div>{debate.judge_decision}</div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="text-[10px] text-muted-foreground/70 italic border-t border-border/30 pt-2">
+        本分析由 AI 多 Agent 框架生成,仅供学习研究参考,不构成任何投资建议。
+      </div>
+    </div>
   )
 }

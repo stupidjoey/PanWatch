@@ -321,6 +321,192 @@ class TestTradingAgentsAgent(unittest.TestCase):
 # ============================================================================
 
 
+class TestPhaseBFeatures(unittest.TestCase):
+    """Phase B 新增功能 — 双模型 / 超时 / 模拟盘 / 缓存绕过 / run_single。"""
+
+    def test_dual_model_config(self):
+        """双模型 — deep_model + quick_model 分别注入 TA config"""
+        ai_client = MagicMock()
+        ai_client.base_url = "https://api.deepseek.com"
+        ai_client.model = "default-model"
+        ai_client.api_key = "sk-x"
+
+        cfg = build_ta_llm_config(
+            ai_client,
+            deep_model="claude-sonnet-4",
+            quick_model="claude-haiku",
+        )
+        self.assertEqual(cfg["deep_think_llm"], "claude-sonnet-4")
+        self.assertEqual(cfg["quick_think_llm"], "claude-haiku")
+
+    def test_quick_model_defaults_to_deep(self):
+        """quick_model 未指定 — fallback 到 deep_model"""
+        ai_client = MagicMock(base_url="x", model="m", api_key="k")
+        cfg = build_ta_llm_config(ai_client, deep_model="claude-sonnet-4")
+        self.assertEqual(cfg["deep_think_llm"], "claude-sonnet-4")
+        self.assertEqual(cfg["quick_think_llm"], "claude-sonnet-4")
+
+    def test_both_default_to_ai_client_model(self):
+        """两个模型都未指定 — 都用 ai_client.model"""
+        ai_client = MagicMock(base_url="x", model="default", api_key="k")
+        cfg = build_ta_llm_config(ai_client)
+        self.assertEqual(cfg["deep_think_llm"], "default")
+        self.assertEqual(cfg["quick_think_llm"], "default")
+
+    def test_agent_init_has_new_phase_b_fields(self):
+        """Agent 实例化 — Phase B 新增字段都正确暴露"""
+        agent = TradingAgentsAgent(
+            deep_model="claude-sonnet-4",
+            quick_model="claude-haiku",
+            timeout_minutes=20,
+            emit_paper_trading_signal=True,
+        )
+        self.assertEqual(agent.deep_model, "claude-sonnet-4")
+        self.assertEqual(agent.quick_model, "claude-haiku")
+        self.assertEqual(agent.timeout_minutes, 20)
+        self.assertTrue(agent.emit_paper_trading_signal)
+
+    def test_paper_trading_bridge_disabled_skips(self):
+        """模拟盘 bridge — enabled=False 直接 skip,不写库"""
+        from src.agents.tradingagents.paper_trading_bridge import (
+            maybe_emit_paper_trading_signal,
+        )
+        result = maybe_emit_paper_trading_signal(
+            stock_symbol="600519",
+            stock_market="CN",
+            stock_name="贵州茅台",
+            decision="buy",
+            confidence=7.0,
+            signal_text="...",
+            reason="...",
+            current_price=1300.0,
+            enabled=False,
+        )
+        self.assertFalse(result)
+
+    def test_paper_trading_bridge_sell_skipped(self):
+        """模拟盘 bridge — SELL 不开新仓 (不会写 buy 信号)"""
+        from src.agents.tradingagents.paper_trading_bridge import (
+            maybe_emit_paper_trading_signal,
+        )
+        result = maybe_emit_paper_trading_signal(
+            stock_symbol="600519",
+            stock_market="CN",
+            stock_name="X",
+            decision="sell",
+            confidence=7.0,
+            signal_text="",
+            reason="",
+            current_price=1300.0,
+            enabled=True,
+        )
+        self.assertFalse(result)
+
+    def test_paper_trading_bridge_no_price_skipped(self):
+        """模拟盘 bridge — 当前价缺失时不写信号(避免错价)"""
+        from src.agents.tradingagents.paper_trading_bridge import (
+            maybe_emit_paper_trading_signal,
+        )
+        result = maybe_emit_paper_trading_signal(
+            stock_symbol="600519",
+            stock_market="CN",
+            stock_name="X",
+            decision="buy",
+            confidence=7.0,
+            signal_text="",
+            reason="",
+            current_price=None,
+            enabled=True,
+        )
+        self.assertFalse(result)
+
+
+class TestPortfolioContext(unittest.TestCase):
+    """Portfolio context 注入到 TradingAgents past_context — 上游官方扩展通道,跨版本稳定。"""
+
+    def _mock_portfolio(self, with_position=True, with_cash=True):
+        portfolio = MagicMock()
+        if with_position:
+            p = MagicMock()
+            p.symbol = "600519"
+            p.name = "贵州茅台"
+            p.cost_price = 1280.0
+            p.quantity = 100
+            p.cost_value = 128000.0
+            p.trading_style = "long"
+            portfolio.get_positions_for_stock.return_value = [p]
+        else:
+            portfolio.get_positions_for_stock.return_value = []
+        portfolio.total_available_funds = 280000.0 if with_cash else 0.0
+        portfolio.total_cost = 128000.0 if with_position else 0.0
+        portfolio.all_positions = [MagicMock()] if with_position else []
+        return portfolio
+
+    def test_empty_portfolio_returns_empty_string(self):
+        """无持仓且无账户 — 不注入(返回空串)"""
+        from src.agents.tradingagents.portfolio_context import build_portfolio_context
+        portfolio = self._mock_portfolio(with_position=False, with_cash=False)
+        result = build_portfolio_context(portfolio, "600519")
+        self.assertEqual(result, "")
+
+    def test_with_position_renders_holding_info(self):
+        """有持仓 — 文本含数量/成本/风格"""
+        from src.agents.tradingagents.portfolio_context import build_portfolio_context
+        portfolio = self._mock_portfolio()
+        text = build_portfolio_context(portfolio, "600519", current_price=1350.0)
+        self.assertIn("[User Portfolio Context]", text)
+        self.assertIn("600519", text)
+        self.assertIn("100 shares", text)
+        self.assertIn("1280", text)
+        self.assertIn("long", text)
+        self.assertIn("长线", text)  # 中文 style 翻译
+        # PnL: (1350 - 1280) * 100 = 7000, ratio = 5.47%
+        self.assertIn("7000.00", text)
+        self.assertIn("5.47%", text)
+
+    def test_no_position_warns_new_entry(self):
+        """有账户但未持有该股票 — 提示这是新建仓决策"""
+        from src.agents.tradingagents.portfolio_context import build_portfolio_context
+        portfolio = self._mock_portfolio(with_position=False, with_cash=True)
+        text = build_portfolio_context(portfolio, "BABA")
+        self.assertIn("does NOT currently hold", text)
+        self.assertIn("new entry", text)
+
+    def test_patch_propagator_prepends_to_past_context(self):
+        """propagator.create_initial_state — portfolio context 拼到 past_context 前面"""
+        from src.agents.tradingagents.portfolio_context import patch_propagator
+
+        captured = {}
+        def original(company_name, trade_date, past_context=""):
+            captured["past_context"] = past_context
+            return {"past_context": past_context}
+
+        graph = MagicMock()
+        graph.propagator.create_initial_state = original
+
+        patch_propagator(graph, "USER PORTFOLIO INFO HERE")
+        # patch 后调用
+        graph.propagator.create_initial_state("AAPL", "2026-05-16", past_context="prior lesson X")
+
+        self.assertIn("USER PORTFOLIO INFO HERE", captured["past_context"])
+        self.assertIn("prior lesson X", captured["past_context"])
+        # portfolio 在前
+        self.assertTrue(
+            captured["past_context"].index("USER PORTFOLIO") <
+            captured["past_context"].index("prior lesson X")
+        )
+
+    def test_patch_propagator_no_context_skips(self):
+        """空 portfolio context — 不 patch,原函数行为不变"""
+        from src.agents.tradingagents.portfolio_context import patch_propagator
+
+        graph = MagicMock()
+        original = graph.propagator.create_initial_state
+        patch_propagator(graph, "")
+        # 函数未被替换
+        self.assertEqual(graph.propagator.create_initial_state, original)
+
+
 class TestAgentCollect(unittest.IsolatedAsyncioTestCase):
     async def test_collect_from_providers(self):
         """collect() — 并发拉 4 个 orchestrator 的数据"""

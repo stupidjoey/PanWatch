@@ -1097,6 +1097,7 @@ async def trigger_agent_for_stock(
     bypass_market_hours: bool = False,
     suppress_notify: bool = False,
     trace_id: str | None = None,
+    force_refresh: bool = False,
 ) -> dict:
     """手动触发 Agent 执行（单只股票）"""
     start = time.monotonic()
@@ -1139,9 +1140,10 @@ async def trigger_agent_for_stock(
         model_label=model_label,
         suppress_notify=suppress_notify,
     )
-    # 暴露 trace_id 给 agent(供 TradingAgents 进度反馈使用)。
+    # 暴露 trace_id / force_refresh 给 agent(供 TradingAgents 进度反馈 + 缓存控制使用)。
     # AgentContext 不强制声明此字段,通过 setattr 注入,其他 agent 不受影响。
     setattr(context, "_trace_id", trace_id)
+    setattr(context, "_force_refresh", force_refresh)
 
     # 创建 agent，支持手动触发参数。TradingAgents 等新 agent 从 AgentConfig 读 config。
     if agent_name == "intraday_monitor":
@@ -1236,6 +1238,15 @@ async def lifespan(app):
     seed_data_sources()
     seed_strategies()
     seed_sample_stocks()
+
+    # 启动时回填历史 TradingAgents 决策到建议池(stock_suggestions)
+    # 早期 TA 运行没写建议池,这次启动一次性补齐,让「AI 建议」面板能看到。
+    # 幂等:已存在不重复写;每次启动重跑代价极低(只查最近 7 天 + dedupe)。
+    try:
+        from src.agents.tradingagents.backfill import backfill_tradingagents_suggestions
+        backfill_tradingagents_suggestions(days=7)
+    except Exception as e:
+        logger.warning(f"TradingAgents 建议回填失败,跳过: {e}")
 
     # 后台刷新股票列表缓存
     import threading

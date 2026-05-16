@@ -341,6 +341,7 @@ async def trigger_stock_agent(
     bypass_market_hours: bool = False,
     allow_unbound: bool = False,
     wait: bool = False,
+    force_refresh: bool = False,
     symbol: str = Query(""),
     market: str = Query("CN"),
     name: str = Query(""),
@@ -426,6 +427,7 @@ async def trigger_stock_agent(
                     bypass_market_hours=bypass_market_hours,
                     suppress_notify=suppress_notify,
                     trace_id=trace_id,
+                    force_refresh=force_refresh,
                 ))
                 logger.info(f"Agent {agent_name} 后台执行完成 - {trigger_stock.symbol}")
             except Exception:
@@ -449,6 +451,7 @@ async def trigger_stock_agent(
             bypass_market_hours=bypass_market_hours,
             suppress_notify=suppress_notify,
             trace_id=trace_id,
+            force_refresh=force_refresh,
         )
         logger.info(f"Agent {agent_name} 执行完成 - {trigger_stock.symbol}")
         return {

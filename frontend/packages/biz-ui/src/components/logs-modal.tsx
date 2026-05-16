@@ -64,6 +64,12 @@ const FLOW_PRESETS: Array<{ key: string, label: string, loggers: string[] }> = [
     label: '盘中监测',
     loggers: ['src.agents.intraday_monitor', 'src.agents.base', 'src.core.scheduler', 'src.core.notifier'],
   },
+  {
+    key: 'tradingagents',
+    label: '深度分析',
+    // 'tradingagents' 子串同时匹配 PanWatch 适配层 (src.agents.tradingagents.*) 和上游 (tradingagents.*)
+    loggers: ['tradingagents', 'src.agents.base', 'src.core.scheduler', 'src.core.notifier'],
+  },
 ]
 
 function unique(arr: string[]) {

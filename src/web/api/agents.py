@@ -388,6 +388,144 @@ async def trigger_agent_endpoint(
         raise HTTPException(500, f"Agent 执行失败: {e}")
 
 
+@router.get("/tradingagents/running")
+def find_running_for_stock(
+    stock_symbol: str = Query(..., description="股票代码"),
+    lookback_minutes: int = Query(default=30, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    """查找某只股票最近 N 分钟内是否有 TradingAgents 运行任务。
+
+    用于 DeepAnalysisModal 重新打开时,**后端权威源**判断是否有正在跑或刚完成的任务,
+    比 localStorage 更可靠(跨浏览器/无痕/换设备都能查到)。
+
+    判断逻辑:
+    1. 查 log_entries 中 event=ta_progress + trace_id 含 -{symbol}- 的最新一条
+    2. 看对应 trace_id 在 agent_runs 表是否有完成记录
+       - 有完成记录 + status=success → 已完成 (前端可拉 latest 结果显示)
+       - 有完成记录 + status=failed → 已失败
+       - 无完成记录 + 日志在 30 分钟内 → running
+       - 无任何日志 → none
+
+    Returns:
+        {"trace_id": str|None, "status": "running"|"success"|"failed"|"none"}
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+
+    latest_log = (
+        db.query(LogEntry)
+        .filter(
+            LogEntry.event == "ta_progress",
+            LogEntry.agent_name == "tradingagents",
+            LogEntry.timestamp >= cutoff,
+            LogEntry.trace_id.like(f"%-{stock_symbol}-%"),
+        )
+        .order_by(LogEntry.timestamp.desc())
+        .first()
+    )
+
+    if not latest_log or not latest_log.trace_id:
+        return {"trace_id": None, "status": "none"}
+
+    trace_id = latest_log.trace_id
+
+    # 检查该 trace 是否已有完成记录
+    run = (
+        db.query(AgentRun)
+        .filter(AgentRun.trace_id == trace_id)
+        .order_by(AgentRun.id.desc())
+        .first()
+    )
+
+    return {
+        "trace_id": trace_id,
+        "status": run.status if run else "running",
+        "last_activity_at": _format_datetime(latest_log.timestamp),
+    }
+
+
+@router.get("/tradingagents/latest")
+def get_tradingagents_latest(
+    stock_symbol: str = Query(..., description="股票代码,如 300418"),
+    db: Session = Depends(get_db),
+):
+    """获取某只股票最近一次 TradingAgents 深度分析的完整结果(含 raw_data)。
+
+    /history 端点 cherry-pick 字段不含 raw_data,这里专门为深度分析弹窗
+    暴露完整字段(suggestion / debate_history / analyst_reports / cost_usd 等)。
+    """
+    from src.web.models import AnalysisHistory
+
+    record = (
+        db.query(AnalysisHistory)
+        .filter(
+            AnalysisHistory.agent_name == "tradingagents",
+            AnalysisHistory.stock_symbol == stock_symbol,
+        )
+        .order_by(
+            AnalysisHistory.analysis_date.desc(),
+            AnalysisHistory.updated_at.desc(),
+            AnalysisHistory.id.desc(),
+        )
+        .first()
+    )
+    if not record:
+        return None
+
+    return {
+        "id": record.id,
+        "agent_name": record.agent_name,
+        "stock_symbol": record.stock_symbol,
+        "analysis_date": record.analysis_date,
+        "title": record.title or "",
+        "content": record.content,
+        "raw_data": record.raw_data or {},
+        "created_at": _format_datetime(record.created_at),
+        "updated_at": _format_datetime(record.updated_at),
+    }
+
+
+@router.get("/tradingagents/budget")
+def get_tradingagents_budget(db: Session = Depends(get_db)):
+    """读取 TradingAgents 本月预算使用情况。
+
+    用于 UI 在「设置」+「DeepAnalysisModal」展示「已用 $X / 预算 $Y」。
+    """
+    agent = (
+        db.query(AgentConfig).filter(AgentConfig.name == "tradingagents").first()
+    )
+    if not agent:
+        raise HTTPException(404, "tradingagents agent 未注册")
+
+    cfg = agent.config or {}
+    monthly_budget = float(cfg.get("monthly_budget_usd", 10.0))
+
+    # 复用 cost_tracker 的 SQL 聚合
+    from src.agents.tradingagents.cost_tracker import check_budget, estimate_cost
+
+    budget = check_budget(monthly_budget, "tradingagents")
+
+    # 单次估算(给前端确认弹窗显示)
+    est = estimate_cost(
+        debate_rounds=int(cfg.get("debate_rounds", 1)),
+        selected_analysts=list(
+            cfg.get("analyst_types", ["market", "social", "news", "fundamentals"])
+        ),
+        model=str(cfg.get("deep_model") or "deepseek-chat"),
+    )
+
+    return {
+        **budget,
+        "estimate_next_run": {
+            "cost_low_usd": est["cost_low_usd"],
+            "cost_high_usd": est["cost_high_usd"],
+            "model": est["model"],
+        },
+        "over_budget_action": cfg.get("over_budget_action", "reject"),
+        "enabled": bool(agent.enabled),
+    }
+
+
 @router.get("/runs/{trace_id}/progress")
 def get_run_progress(trace_id: str, db: Session = Depends(get_db)):
     """读取一次 agent 运行的进度。

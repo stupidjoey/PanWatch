@@ -179,7 +179,8 @@ export function KlineSummaryDialog({
     window.dispatchEvent(new CustomEvent('panwatch-open-chat', {
       detail: { symbol, market, stockName: stockName || symbol, pageContext: parts.join('\n') }
     }))
-  }, [effectiveSummary, suggestion, symbol, market, stockName])
+    onOpenChange(false)
+  }, [effectiveSummary, suggestion, symbol, market, stockName, onOpenChange])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

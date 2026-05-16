@@ -145,6 +145,11 @@ AGENT_SEED_SPECS: tuple[AgentSeedSpec, ...] = (
             "over_budget_action": "reject",
             "cache_ttl_hours": 12,
             "output_language": "Chinese",
+            "deep_model": "",       # 留空走默认 AI Service 的 model;可填如 "claude-sonnet-4"
+            "quick_model": "",      # 留空 = deep_model;可填便宜模型如 "deepseek-chat"
+            "timeout_minutes": 15,
+            "emit_paper_trading_signal": False,  # 是否把 BUY 决策写入 StrategySignalRun
+                                                  # 驱动模拟盘自动开仓 (默认关,需用户主动启用)
         },
     ),
 )

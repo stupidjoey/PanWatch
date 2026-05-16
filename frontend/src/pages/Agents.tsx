@@ -169,6 +169,9 @@ export default function AgentsPage() {
 
   // 调度编辑弹窗
   const [scheduleDialogAgent, setScheduleDialogAgent] = useState<AgentConfig | null>(null)
+  // TradingAgents 深度配置弹窗(双模型 / 预算 / 超时 / 模拟盘对接)
+  const [taConfigAgent, setTaConfigAgent] = useState<AgentConfig | null>(null)
+  const [taConfigForm, setTaConfigForm] = useState<Record<string, unknown>>({})
   const [scheduleConfig, setScheduleConfig] = useState<ScheduleConfig>({ type: 'daily', time: '15:30' })
   const [schedulePreview, setSchedulePreview] = useState<SchedulePreview | { error: string } | null>(null)
   const [schedulePreviewLoading, setSchedulePreviewLoading] = useState(false)
@@ -439,6 +442,28 @@ export default function AgentsPage() {
     load()
   }
 
+  // 当 taConfigAgent 切换时,把它的 config 拷到表单
+  useEffect(() => {
+    if (taConfigAgent) {
+      setTaConfigForm({ ...(taConfigAgent.config || {}) })
+    }
+  }, [taConfigAgent])
+
+  const saveTaConfig = async () => {
+    if (!taConfigAgent) return
+    try {
+      await fetchAPI(`/agents/${taConfigAgent.name}`, {
+        method: 'PUT',
+        body: JSON.stringify({ config: taConfigForm }),
+      })
+      toast('TradingAgents 配置已保存', 'success')
+      setTaConfigAgent(null)
+      load()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '保存失败', 'error')
+    }
+  }
+
   const openScheduleDialog = (agent: AgentConfig) => {
     setScheduleDialogAgent(agent)
     setScheduleConfig(parseCronToConfig(agent.schedule))
@@ -546,6 +571,16 @@ export default function AgentsPage() {
                         <span className="text-[12px] text-foreground">{formatSchedule(agent.schedule)}</span>
                         <Settings2 className="w-3 h-3 text-muted-foreground/50" />
                       </button>
+                      {agent.name === 'tradingagents' && (
+                        <button
+                          onClick={() => setTaConfigAgent(agent)}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-primary/10 hover:bg-primary/20 transition-colors text-primary"
+                          title="编辑 TradingAgents 双模型/预算/超时/模拟盘等高级配置"
+                        >
+                          <Settings2 className="w-3.5 h-3.5" />
+                          <span className="text-[12px]">深度配置</span>
+                        </button>
+                      )}
                     </div>
 
                     {/* 未来触发时间（按调度时区） */}
@@ -887,6 +922,194 @@ export default function AgentsPage() {
 
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" onClick={() => setBindDialogAgent(null)}>关闭</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* TradingAgents 深度配置弹窗 */}
+      <Dialog open={!!taConfigAgent} onOpenChange={open => !open && setTaConfigAgent(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>TradingAgents 深度配置</DialogTitle>
+            <DialogDescription>
+              双模型分档 / 月度预算 / 超时 / 模拟盘对接。完整说明见
+              <code className="ml-1 text-[11px] bg-accent/40 px-1">.docs/tradingagents/USER_GUIDE.md § 12</code>
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5 mt-2 text-[13px]">
+            {/* 模型分档(可选)— 从 Agent 默认 model 所在的同一 AI Service 选 */}
+            {(() => {
+              // Agent 卡片上选的默认 model 决定 service;深度/快速只能从同 service 里选
+              const defaultModelId = taConfigAgent?.ai_model_id ?? null
+              const agentService = defaultModelId
+                ? services.find(s => s.models.some(m => m.id === defaultModelId))
+                : null
+              const defaultModel = defaultModelId
+                ? agentService?.models.find(m => m.id === defaultModelId)
+                : null
+              // 候选 model 列表:有 service 则限定该 service,否则所有 services 全部 model
+              const candidateModels = agentService
+                ? agentService.models
+                : services.flatMap(s => s.models)
+
+              return (
+                <section>
+                  <div className="font-medium mb-2">模型分档(可选)</div>
+
+                  {/* 显示 Agent 默认模型来源,让用户知道 service 上下文 */}
+                  <div className="rounded-md bg-accent/30 border border-border/40 p-2 text-[11px] text-muted-foreground mb-3">
+                    {defaultModel && agentService ? (
+                      <>当前 Agent 默认模型: <span className="text-foreground font-medium">{defaultModel.model}</span>
+                       <span className="opacity-70"> (来自 {agentService.name})</span></>
+                    ) : (
+                      <>当前 Agent 使用系统默认 AI 服务(在 Agent 卡片上「模型」处选择)。
+                       建议先选定一个 Service 再来分档配置。</>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-[12px]">
+                        深度思考模型 <span className="text-muted-foreground/70 font-normal">(辩论/风控/PM)</span>
+                      </Label>
+                      <Select
+                        value={(taConfigForm.deep_model as string) || '__default__'}
+                        onValueChange={val => setTaConfigForm({ ...taConfigForm, deep_model: val === '__default__' ? '' : val })}
+                      >
+                        <SelectTrigger className="h-9 text-[12px]">
+                          <SelectValue placeholder="使用 Agent 默认" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">使用 Agent 默认</SelectItem>
+                          {candidateModels.map(m => (
+                            <SelectItem key={`deep-${m.id}`} value={m.model}>
+                              {m.model}{m.name !== m.model ? ` · ${m.name}` : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="text-[12px]">
+                        快速思考模型 <span className="text-muted-foreground/70 font-normal">(分析师/工具)</span>
+                      </Label>
+                      <Select
+                        value={(taConfigForm.quick_model as string) || '__default__'}
+                        onValueChange={val => setTaConfigForm({ ...taConfigForm, quick_model: val === '__default__' ? '' : val })}
+                      >
+                        <SelectTrigger className="h-9 text-[12px]">
+                          <SelectValue placeholder="= 深度模型" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">= 深度模型</SelectItem>
+                          {candidateModels.map(m => (
+                            <SelectItem key={`quick-${m.id}`} value={m.model}>
+                              {m.model}{m.name !== m.model ? ` · ${m.name}` : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-2 space-y-0.5">
+                    <div>• 留空 = 用 Agent 默认模型,不分档</div>
+                    <div>• 两个分档必须在同一个 AI 服务下(TradingAgents 共用 backend_url)</div>
+                    <div className="text-amber-600">⚠️ 不要选推理模型 (如 deepseek-r1 / o1) — 它们在 langchain agent loop 里会输出乱码。用 chat 类: claude-sonnet / deepseek-chat / gpt-4o-mini</div>
+                  </div>
+                </section>
+              )
+            })()}
+
+            {/* 预算与策略 */}
+            <section>
+              <div className="font-medium mb-2">预算与策略</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-[12px]">月度预算(美元)</Label>
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={String(taConfigForm.monthly_budget_usd ?? 10)}
+                    onChange={e => setTaConfigForm({ ...taConfigForm, monthly_budget_usd: parseFloat(e.target.value) || 0 })}
+                  />
+                </div>
+                <div>
+                  <Label className="text-[12px]">超预算行为</Label>
+                  <select
+                    className="w-full h-9 rounded-md border border-border bg-background px-3 text-[13px]"
+                    value={(taConfigForm.over_budget_action as string) || 'reject'}
+                    onChange={e => setTaConfigForm({ ...taConfigForm, over_budget_action: e.target.value })}
+                  >
+                    <option value="reject">拒绝新触发</option>
+                    <option value="warn">警告但继续</option>
+                    <option value="continue">不提示也不挡</option>
+                  </select>
+                </div>
+                <div>
+                  <Label className="text-[12px]">辩论轮次</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={String(taConfigForm.debate_rounds ?? 1)}
+                    onChange={e => setTaConfigForm({ ...taConfigForm, debate_rounds: parseInt(e.target.value) || 1 })}
+                  />
+                </div>
+                <div>
+                  <Label className="text-[12px]">超时(分钟)</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={String(taConfigForm.timeout_minutes ?? 15)}
+                    onChange={e => setTaConfigForm({ ...taConfigForm, timeout_minutes: parseInt(e.target.value) || 15 })}
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* 模拟盘对接 */}
+            <section>
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="checkbox"
+                  id="emit-paper-trading"
+                  checked={!!taConfigForm.emit_paper_trading_signal}
+                  onChange={e => setTaConfigForm({ ...taConfigForm, emit_paper_trading_signal: e.target.checked })}
+                />
+                <label htmlFor="emit-paper-trading" className="font-medium cursor-pointer">
+                  把 BUY 决策写入模拟盘信号
+                </label>
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                启用后,TA 输出 BUY 决策时会写一条 StrategySignalRun,PaperTradingEngine 下个 tick 自动开模拟仓
+                (止损 -5%,止盈 +10%)。<strong>默认关闭</strong> 防止误开仓。SELL 不会自动平仓。
+              </div>
+            </section>
+
+            {/* 高级 JSON */}
+            <details className="text-[12px]">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                高级:完整 config JSON
+              </summary>
+              <textarea
+                className="mt-2 w-full font-mono text-[11px] p-2 border border-border rounded bg-background min-h-[120px]"
+                value={JSON.stringify(taConfigForm, null, 2)}
+                onChange={e => {
+                  try {
+                    setTaConfigForm(JSON.parse(e.target.value))
+                  } catch {
+                    /* 输入未完成,允许继续编辑 */
+                  }
+                }}
+              />
+            </details>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => setTaConfigAgent(null)}>取消</Button>
+              <Button onClick={saveTaConfig}>保存</Button>
             </div>
           </div>
         </DialogContent>

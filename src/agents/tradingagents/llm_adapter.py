@@ -26,18 +26,25 @@ def build_ta_llm_config(
     debate_rounds: int = 1,
     selected_analysts: list[str] | None = None,
     output_language: str = "Chinese",
+    deep_model: str | None = None,
+    quick_model: str | None = None,
 ) -> dict[str, Any]:
     """生成 TradingAgents 期望的 config dict。
 
     继承 tradingagents.default_config.DEFAULT_CONFIG (含 data_cache_dir / project_dir /
     memory_log_path 等必需字段),再覆盖 PanWatch 配置:
-    - llm_provider: 统一走 openai 兼容协议
+    - llm_provider: 统一走 openrouter 兼容协议(走 chat completions,避开 OpenAI Responses API)
     - backend_url: PanWatch AI 服务的 base_url
-    - deep_think_llm / quick_think_llm: 默认都用 PanWatch 默认 AI model
-      (Phase B 会拆开,允许用户分别配置)
+    - deep_think_llm: 推理/辩论/风控/PM 用的"强模型"。默认走 ai_client.model;
+      可由 deep_model 参数覆盖,允许辩论用 claude-sonnet / o3 这种贵但准的模型
+    - quick_think_llm: 分析师工具调用用的"快模型"。默认 deep_model;
+      可由 quick_model 参数覆盖,允许分析师用 haiku / gpt-4o-mini 等便宜模型
     - max_debate_rounds: 辩论轮次
     - selected_analysts: ["market", "social", "news", "fundamentals"]
     - output_language: "Chinese" / "English"
+
+    注意:TA 上游 deep + quick 共用 backend_url,所以两个模型必须在**同一个 endpoint** 后面。
+    要混 Claude + GPT 推荐 LiteLLM proxy 把多 provider 聚合到一个 endpoint。
     """
     analysts = list(selected_analysts or VALID_ANALYSTS)
     invalid = [a for a in analysts if a not in VALID_ANALYSTS]
@@ -60,11 +67,17 @@ def build_ta_llm_config(
     # 服务不支持这个端点,会 404。
     # 用 "openrouter" 走标准 chat completions (/v1/chat/completions),同时 backend_url
     # 覆盖默认 openrouter 端点为 PanWatch 配置的真实 base_url。
+    # 双模型解析:
+    # - deep_model 未指定 → 用 ai_client.model
+    # - quick_model 未指定 → 用 deep_model(单模型场景退化)
+    deep_llm = (deep_model or ai_client.model or "").strip() or ai_client.model
+    quick_llm = (quick_model or deep_llm or "").strip() or deep_llm
+
     config.update({
         "llm_provider": "openrouter",
         "backend_url": ai_client.base_url,
-        "deep_think_llm": ai_client.model,
-        "quick_think_llm": ai_client.model,
+        "deep_think_llm": deep_llm,
+        "quick_think_llm": quick_llm,
         "max_debate_rounds": max(1, int(debate_rounds)),
         "max_risk_discuss_rounds": 1,
         "selected_analysts": analysts,
