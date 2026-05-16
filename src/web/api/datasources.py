@@ -168,8 +168,10 @@ async def test_datasource(source_id: int, db: Session = Depends(get_db)):
 
     result = await manager.test_source(source)
 
+    # 不用 success / data 作为顶层字段,避免被 ResponseWrapperMiddleware 当成业务响应
+    # 拆解后导致 metadata 丢失(详见 src/web/response.py:59 的特殊分支)。
     return {
-        "success": result.success,
+        "test_passed": result.success,
         "source_name": source.name,
         "source_type": source.type,
         "type_label": TYPE_LABELS.get(source.type, source.type),
@@ -179,6 +181,6 @@ async def test_datasource(source_id: int, db: Session = Depends(get_db)):
         "count": result.count,
         "duration_ms": result.duration_ms,
         "error": result.error,
-        "data": result.data,
+        "items": result.data,
         "logs": manager.get_logs(),
     }

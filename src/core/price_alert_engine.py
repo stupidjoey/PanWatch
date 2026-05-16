@@ -11,9 +11,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.collectors.akshare_collector import _fetch_tencent_quotes, _tencent_symbol
 from src.collectors.kline_collector import KlineCollector
 from src.core.notifier import NotifierManager
+from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.models.market import MarketCode, MARKETS
 from src.web.database import SessionLocal
 from src.web.models import NotifyChannel, PriceAlertHit, PriceAlertRule, Stock
@@ -111,22 +111,24 @@ class PriceAlertEngine:
         self.kline_ttl_sec = 60.0
 
     async def _fetch_quotes_map(self, stocks: list[Stock]) -> dict[tuple[str, str], dict]:
+        """走 QuoteOrchestrator,支持多 provider 主备故障转移。"""
         grouped: dict[MarketCode, list[Stock]] = {}
         for s in stocks:
             grouped.setdefault(_to_market(s.market), []).append(s)
 
+        orch = get_quote_orchestrator()
         out: dict[tuple[str, str], dict] = {}
         for market, items in grouped.items():
             symbols = [s.symbol for s in items]
             if not symbols:
                 continue
-            tencent_symbols = [_tencent_symbol(sym, market) for sym in symbols]
-            try:
-                rows = await asyncio.to_thread(_fetch_tencent_quotes, tencent_symbols)
-            except Exception as e:
-                logger.error(f"价格提醒批量拉行情失败 {market.value}: {e}")
-                rows = []
-            by_symbol = {str(r.get("symbol")): r for r in rows}
+            resp = await orch.fetch(
+                ProviderRequest(symbols=tuple(symbols), market=market.value)
+            )
+            if not resp.success:
+                logger.error(f"价格提醒批量拉行情失败 {market.value}: {resp.error}")
+                continue
+            by_symbol = {str(r.get("symbol")): r for r in (resp.data or [])}
             for sym in symbols:
                 q = by_symbol.get(sym)
                 if q:

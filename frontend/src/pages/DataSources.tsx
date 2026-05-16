@@ -19,7 +19,7 @@ interface TestLogItem {
 }
 
 interface TestResult {
-  success: boolean
+  test_passed: boolean
   source_name: string
   source_type: string
   type_label: string
@@ -29,7 +29,7 @@ interface TestResult {
   count: number
   duration_ms: number
   error?: string
-  data?: unknown[] | { image?: string }  // array for most types, object for chart
+  items?: unknown[] | { image?: string }  // array for most types, object for chart
   logs: TestLogItem[]
 }
 
@@ -122,6 +122,7 @@ export default function DataSourcesPage() {
       const payload = {
         priority: form.priority,
         test_symbols: testSymbols,
+        config: form.config || {},
       }
       await fetchAPI(`/datasources/${editId}`, { method: 'PUT', body: JSON.stringify(payload) })
       setDialogOpen(false)
@@ -278,6 +279,62 @@ export default function DataSourcesPage() {
                 placeholder="如 601127, 600519"
               />
             </div>
+
+            {/* 凭证类配置：按 provider 渲染对应字段 */}
+            {form.provider === 'tushare' && (
+              <div>
+                <Label>
+                  Tushare Token
+                  <span className="text-muted-foreground font-normal ml-1">
+                    (登录 tushare.pro 个人主页获取)
+                  </span>
+                </Label>
+                <Input
+                  type="password"
+                  value={(form.config?.token as string) || ''}
+                  onChange={e => setForm({ ...form, config: { ...form.config, token: e.target.value } })}
+                  placeholder="粘贴 token,留空则从环境变量 TUSHARE_TOKEN 读取"
+                />
+              </div>
+            )}
+            {form.provider === 'xueqiu' && form.type === 'news' && (
+              <div>
+                <Label>
+                  雪球 Cookies
+                  <span className="text-muted-foreground font-normal ml-1">
+                    (浏览器开发者工具 → Network → 复制完整 cookie 字符串)
+                  </span>
+                </Label>
+                <Input
+                  type="password"
+                  value={(form.config?.cookies as string) || ''}
+                  onChange={e => setForm({ ...form, config: { ...form.config, cookies: e.target.value } })}
+                  placeholder="xq_a_token=...; xq_r_token=...; ..."
+                />
+              </div>
+            )}
+
+            {/* 高级:完整 JSON 编辑(只读形式,展开后可编辑) */}
+            {Object.keys(form.config || {}).length > 0 && (
+              <details className="text-[12px]">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                  高级:查看/编辑完整 config JSON
+                </summary>
+                <textarea
+                  className="mt-2 w-full font-mono text-[11px] p-2 border border-border rounded bg-background min-h-[100px]"
+                  value={JSON.stringify(form.config || {}, null, 2)}
+                  onChange={e => {
+                    try {
+                      const parsed = JSON.parse(e.target.value)
+                      setForm({ ...form, config: parsed })
+                    } catch {
+                      // 解析失败时不更新,允许用户继续输入
+                    }
+                  }}
+                />
+              </details>
+            )}
+
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={() => setDialogOpen(false)}>取消</Button>
               <Button onClick={saveSource}>保存</Button>
@@ -294,7 +351,7 @@ export default function DataSourcesPage() {
         >
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              {testResult?.success ? (
+              {testResult?.test_passed ? (
                 <Check className="w-5 h-5 text-emerald-500" />
               ) : (
                 <X className="w-5 h-5 text-red-500" />
@@ -312,8 +369,8 @@ export default function DataSourcesPage() {
             <div className="flex items-center gap-4 p-3 rounded-lg bg-accent/30">
               <div className="flex-1">
                 <div className="text-[11px] text-muted-foreground">状态</div>
-                <div className={`text-[13px] font-medium ${testResult?.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
-                  {testResult?.success ? '测试成功' : '测试失败'}
+                <div className={`text-[13px] font-medium ${testResult?.test_passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
+                  {testResult?.test_passed ? '测试成功' : '测试失败'}
                 </div>
               </div>
               <div className="flex-1">
@@ -364,23 +421,23 @@ export default function DataSourcesPage() {
 
             {/* Data Preview */}
             {/* Chart type - show image outside scrollable area */}
-            {testResult?.success && testResult.source_type === 'chart' && (testResult.data as {image?: string})?.image && (
+            {testResult?.test_passed && testResult.source_type === 'chart' && (testResult.items as {image?: string})?.image && (
               <div>
                 <div className="text-[12px] font-medium text-foreground mb-2">数据预览</div>
                 <div className="rounded-lg overflow-hidden border">
-                  <img src={(testResult.data as {image: string}).image} alt="K线图截图" className="w-full" />
+                  <img src={(testResult.items as {image: string}).image} alt="K线图截图" className="w-full" />
                 </div>
               </div>
             )}
 
             {/* Other data types - in scrollable container */}
-            {testResult?.success && testResult.data && testResult.source_type !== 'chart' && Array.isArray(testResult.data) && testResult.data.length > 0 && (
+            {testResult?.test_passed && testResult.items && testResult.source_type !== 'chart' && Array.isArray(testResult.items) && testResult.items.length > 0 && (
               <div>
                 <div className="text-[12px] font-medium text-foreground mb-2">数据预览</div>
                 <div className="space-y-1.5 max-h-60 overflow-y-auto">
 
                   {/* News type */}
-                  {testResult.source_type === 'news' && testResult.data.map((item, i) => {
+                  {testResult.source_type === 'news' && testResult.items.map((item, i) => {
                     const newsItem = item as { title?: string; time?: string }
                     return (
                       <div key={i} className="flex items-start gap-2 p-2 rounded-lg bg-accent/30">
@@ -391,7 +448,7 @@ export default function DataSourcesPage() {
                   })}
 
                   {/* Events type */}
-                  {testResult.source_type === 'events' && testResult.data.map((item, i) => {
+                  {testResult.source_type === 'events' && testResult.items.map((item, i) => {
                     const ev = item as { title?: string; time?: string; event_type?: string }
                     return (
                       <div key={i} className="flex items-start gap-2 p-2 rounded-lg bg-accent/30">
@@ -403,7 +460,7 @@ export default function DataSourcesPage() {
                   })}
 
                   {/* Quote type */}
-                  {testResult.source_type === 'quote' && testResult.data.map((item, i) => {
+                  {testResult.source_type === 'quote' && testResult.items.map((item, i) => {
                     const quoteItem = item as { symbol?: string; name?: string; price?: number; change_pct?: number }
                     return (
                       <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-accent/30">
@@ -421,7 +478,7 @@ export default function DataSourcesPage() {
                   })}
 
                   {/* Kline type */}
-                  {testResult.source_type === 'kline' && testResult.data.map((item, i) => {
+                  {testResult.source_type === 'kline' && testResult.items.map((item, i) => {
                     const klineItem = item as { symbol?: string; last_close?: number; trend?: string }
                     return (
                       <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-accent/30">
@@ -435,7 +492,7 @@ export default function DataSourcesPage() {
                   })}
 
                   {/* Capital flow type */}
-                  {testResult.source_type === 'capital_flow' && testResult.data.map((item, i) => {
+                  {testResult.source_type === 'capital_flow' && testResult.items.map((item, i) => {
                     const flowItem = item as { symbol?: string; name?: string; main_net?: number; main_pct?: number }
                     return (
                       <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-accent/30">

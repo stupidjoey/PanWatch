@@ -115,11 +115,12 @@ class DataCollectorManager:
         )
         self.logs.append(log)
 
-        # 同时输出到 logger
+        # 同时输出到 logger:error 走 WARNING；start/success 是底层心跳,降到 DEBUG。
+        # UI 日志板始终从 self.logs 读完整记录,不受这里影响。
         if action == "error":
             logger.warning(f"[{source_name}] {message}")
         else:
-            logger.info(f"[{source_name}] {message}")
+            logger.debug(f"[{source_name}] {message}")
 
     def get_logs(self) -> list[dict]:
         """获取日志（用于 UI 展示）"""
@@ -458,27 +459,9 @@ class DataCollectorManager:
                 )
 
         elif source.type == "kline":
-            from src.collectors.kline_collector import KlineCollector
-
-            collector = KlineCollector(MarketCode.CN)
-            results = []
-            for symbol in test_symbols[:3]:
-                summary = collector.get_kline_summary(symbol)
-                if not summary.get("error"):
-                    results.append(
-                        {
-                            "symbol": symbol,
-                            "last_close": summary.get("last_close"),
-                            "trend": summary.get("trend"),
-                        }
-                    )
-
-            return CollectorResult(
-                success=len(results) > 0,
-                data=results,
-                count=len(results),
-                error="" if results else "获取 K 线数据失败",
-            )
+            # 按 provider 路由到对应 Provider,而不是写死走 tencent (KlineCollector)。
+            # Tushare/YFinance 的 token 等配置从 source.config 注入。
+            return await self._test_kline_source(source, test_symbols)
 
         elif source.type == "capital_flow":
             from src.collectors.capital_flow_collector import CapitalFlowCollector
@@ -505,25 +488,8 @@ class DataCollectorManager:
             )
 
         elif source.type == "quote":
-            from src.collectors.akshare_collector import AkshareCollector
-
-            collector = AkshareCollector(MarketCode.CN)
-            stocks = await collector.get_stock_data(test_symbols[:5])
-
-            return CollectorResult(
-                success=len(stocks) > 0,
-                data=[
-                    {
-                        "symbol": s.symbol,
-                        "name": s.name,
-                        "price": s.current_price,
-                        "change_pct": s.change_pct,
-                    }
-                    for s in stocks
-                ],
-                count=len(stocks),
-                error="" if stocks else "获取行情失败",
-            )
+            # 按 provider 路由到对应 Provider,Tushare(暂无 quote)/YFinance 可正确测到。
+            return await self._test_quote_source(source, test_symbols)
 
         elif source.type == "chart":
             from src.collectors.screenshot_collector import ScreenshotCollector
@@ -599,6 +565,129 @@ class DataCollectorManager:
 
         return CollectorResult(
             success=False, error=f"不支持的数据源类型: {source.type}"
+        )
+
+    async def _test_kline_source(
+        self, source: DataSource, test_symbols: list[str]
+    ) -> CollectorResult:
+        """按 provider 测试 K 线源:tencent/tushare/yfinance 各走自己实现,不串备份链。
+
+        测试需要的是"这个 provider 自己工作正常",不是"整条主备链有 fallback 能跑通",
+        所以不走 Orchestrator(它会自动切到下一条)。
+        """
+        from src.core.providers.base import ProviderRequest
+        from src.core.providers.kline.tencent import TencentKlineProvider
+        from src.core.providers.kline.tushare import TushareKlineProvider
+        from src.core.providers.kline.yfinance import YFinanceKlineProvider
+
+        cfg = source.config or {}
+        if source.provider == "tencent":
+            provider = TencentKlineProvider(config=cfg)
+            market = "CN"
+        elif source.provider == "tushare":
+            provider = TushareKlineProvider(config=cfg)
+            market = "CN"
+            if provider._init_error:
+                return CollectorResult(
+                    success=False, error=provider._init_error
+                )
+        elif source.provider == "yfinance":
+            provider = YFinanceKlineProvider(config=cfg)
+            market = "US"  # yfinance 默认用 US 测,A 股不支持
+            if provider._init_error:
+                return CollectorResult(
+                    success=False, error=provider._init_error
+                )
+        else:
+            return CollectorResult(
+                success=False, error=f"未知的 kline provider: {source.provider}"
+            )
+
+        results = []
+        first_error = ""
+        for symbol in test_symbols[:3]:
+            try:
+                resp = await provider.fetch(
+                    ProviderRequest(
+                        symbols=(symbol,), market=market, extra=(("days", 30),)
+                    )
+                )
+                if resp.success and resp.data:
+                    last = resp.data[-1]
+                    last_close = getattr(last, "close", None) or (
+                        last.get("close") if isinstance(last, dict) else None
+                    )
+                    last_date = getattr(last, "date", None) or (
+                        last.get("date") if isinstance(last, dict) else None
+                    )
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "last_close": last_close,
+                            "last_date": last_date,
+                            "count": len(resp.data),
+                        }
+                    )
+                elif not first_error:
+                    first_error = resp.error or "无数据"
+            except Exception as e:
+                if not first_error:
+                    first_error = str(e)
+
+        return CollectorResult(
+            success=len(results) > 0,
+            data=results,
+            count=len(results),
+            error="" if results else (first_error or "获取 K 线数据失败"),
+        )
+
+    async def _test_quote_source(
+        self, source: DataSource, test_symbols: list[str]
+    ) -> CollectorResult:
+        """按 provider 测试行情源。"""
+        from src.core.providers.base import ProviderRequest
+        from src.core.providers.quote.tencent import TencentQuoteProvider
+        from src.core.providers.quote.yfinance import YFinanceQuoteProvider
+
+        cfg = source.config or {}
+        if source.provider == "tencent":
+            provider = TencentQuoteProvider(config=cfg)
+            market = "CN"
+        elif source.provider == "yfinance":
+            provider = YFinanceQuoteProvider(config=cfg)
+            market = "US"
+            if provider._init_error:
+                return CollectorResult(
+                    success=False, error=provider._init_error
+                )
+        else:
+            return CollectorResult(
+                success=False, error=f"未知的 quote provider: {source.provider}"
+            )
+
+        try:
+            resp = await provider.fetch(
+                ProviderRequest(symbols=tuple(test_symbols[:5]), market=market)
+            )
+        except Exception as e:
+            return CollectorResult(success=False, error=str(e))
+
+        if not resp.success:
+            return CollectorResult(success=False, error=resp.error or "获取行情失败")
+
+        return CollectorResult(
+            success=len(resp.data) > 0,
+            data=[
+                {
+                    "symbol": item.get("symbol"),
+                    "name": item.get("name"),
+                    "price": item.get("current_price"),
+                    "change_pct": item.get("change_pct"),
+                }
+                for item in (resp.data or [])
+            ],
+            count=len(resp.data or []),
+            error="" if resp.data else "获取行情失败",
         )
 
 

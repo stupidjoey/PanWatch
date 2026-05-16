@@ -127,6 +127,8 @@ docker-compose up -d
 | `DATA_DIR` | 数据存储目录 | `./data` |
 | `TZ` | 应用时区（影响 Agent 调度触发时间与时间展示） | `Asia/Shanghai` |
 | `PLAYWRIGHT_SKIP_BROWSER_INSTALL` | 跳过首次 Chromium 安装（不需要截图时可用） | 未设置 |
+| `LOG_LEVEL` | 控制台日志级别。默认 `INFO`（只输出业务事件 + 错误）；排查问题时设 `DEBUG` 可看到调度心跳、采集过程等底层日志。UI 日志板始终保留完整记录，不受影响 | `INFO` |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` | 出站 HTTP 代理。三种配置方式任选其一: ① 启动前 `export HTTP_PROXY=...`；② `.env` 里写 `http_proxy=http://host:port`；③ UI「设置 → 全局 HTTP 代理」。三者优先级:外部环境变量 > UI > `.env`。生效后所有 httpx 客户端走代理。`NO_PROXY` 默认包含 `localhost,127.0.0.1` | 未设置 |
 
 </details>
 
@@ -146,16 +148,20 @@ docker-compose up -d
 **环境要求**：Python 3.10+ / Node.js 18+ / pnpm
 
 ```bash
-# 后端
+# 一键开发（推荐）
+make dev-api          # 启动后端（自动 venv+依赖，监听 :8000）
+make dev-web          # 启动前端（自动 pnpm install，监听 :5183）
+
+# 或手动
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-python server.py
+python server.py                              # 后端 :8000
 
-# 前端（新终端）
-cd frontend && pnpm install && pnpm dev
+cd frontend && pnpm install && pnpm dev       # 前端 :5183
 ```
 
-前端运行在 `http://localhost:5173`，自动代理 API 到后端。
+前端 dev server 跑在 `http://localhost:5183`，并把 `/api` 代理到 `127.0.0.1:8000`。
+前端用 `:5183` 而非默认 `:5173`，是为了和 BeeCount-Cloud 等本地常驻前端错开。
 
 </details>
 

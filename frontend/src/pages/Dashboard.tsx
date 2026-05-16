@@ -831,52 +831,47 @@ export default function DashboardPage() {
       {/* Risk dialog removed (was too noisy when empty) */}
 
       {/* Header */}
-      <div className="mb-5">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 md:gap-3">
-            <div>
-              <h1 className="text-[18px] md:text-[20px] font-bold text-foreground tracking-tight">Dashboard</h1>
-            </div>
-          </div>
+      <div className="mb-4 md:mb-5">
+        {/* Row 1: title + controls 同一行（移动端也不换行） */}
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-[18px] md:text-[20px] font-bold text-foreground tracking-tight shrink-0">Dashboard</h1>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 rounded-2xl bg-accent/20 border border-border/40">
-              <div className="flex items-center gap-1 md:gap-1.5">
-                <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
-                <span className="text-[11px] md:text-[12px] text-muted-foreground hidden sm:inline">自动刷新</span>
-                {autoRefresh && (
-                  <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
-                    <SelectTrigger className="h-6 w-14 md:w-16 text-[10px] md:text-[11px] px-1.5 md:px-2">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="10">10s</SelectItem>
-                      <SelectItem value="30">30s</SelectItem>
-                      <SelectItem value="60">1分钟</SelectItem>
-                      <SelectItem value="120">2分钟</SelectItem>
-                    </SelectContent>
-                  </Select>
-                )}
-              </div>
+          <div className="flex items-center gap-1.5 md:gap-2 min-w-0">
+            <div className="flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 md:py-2 rounded-xl md:rounded-2xl bg-accent/20 border border-border/40">
+              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
+              <span className="text-[11px] md:text-[12px] text-muted-foreground hidden sm:inline">自动刷新</span>
+              {autoRefresh && (
+                <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
+                  <SelectTrigger className="h-6 w-14 md:w-16 text-[10px] md:text-[11px] px-1.5 md:px-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10s</SelectItem>
+                    <SelectItem value="30">30s</SelectItem>
+                    <SelectItem value="60">1分钟</SelectItem>
+                    <SelectItem value="120">2分钟</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
               {lastRefreshTime && (
                 <>
-                  <div className="w-px h-4 bg-border hidden sm:block" />
-                  <span className="text-[9px] md:text-[10px] text-muted-foreground/60 hidden md:inline font-mono">
+                  <div className="w-px h-4 bg-border hidden md:block" />
+                  <span className="text-[10px] text-muted-foreground/60 hidden md:inline font-mono">
                     {lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                   </span>
                 </>
               )}
             </div>
 
-            <Button variant="secondary" size="sm" onClick={handleRefresh} disabled={quotesLoading || portfolioLoading} className="h-9 px-3">
+            <Button variant="secondary" size="sm" onClick={handleRefresh} disabled={quotesLoading || portfolioLoading} className="h-8 md:h-9 w-8 md:w-auto md:px-3 p-0 md:p-2">
               <RefreshCw className={`w-4 h-4 ${quotesLoading || portfolioLoading ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">刷新</span>
+              <span className="hidden md:inline ml-1">刷新</span>
             </Button>
           </div>
         </div>
 
-        {/* Market status pills */}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        {/* Row 2: 市场状态 pills - 移动端横向滚动一行,不浪费纵向空间 */}
+        <div className="mt-2 flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1 md:flex-wrap md:overflow-visible">
           {marketStatus.map(m => {
             const statusColors: Record<string, string> = {
               trading: 'bg-emerald-500',
@@ -888,18 +883,19 @@ export default function DashboardPage() {
             return (
               <div
                 key={m.code}
-                className="px-2.5 py-1 rounded-full bg-background/70 border border-border/50 text-[11px] text-muted-foreground flex items-center gap-1.5"
-                title={`${m.sessions.join(', ')} (${m.local_time})`}
+                className="shrink-0 px-2 md:px-2.5 py-0.5 md:py-1 rounded-full bg-background/70 border border-border/50 text-[10px] md:text-[11px] text-muted-foreground flex items-center gap-1 md:gap-1.5"
+                title={`${m.sessions.join(', ')} (${m.local_time}) · ${m.status_text}`}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${statusColors[m.status] || 'bg-slate-400'}`} />
                 <span className="text-foreground/90">{m.name}</span>
-                <span className={`${m.is_trading ? 'text-emerald-600' : 'text-muted-foreground/60'}`}>{m.status_text}</span>
+                <span className={`${m.is_trading ? 'text-emerald-600' : 'text-muted-foreground/60'} hidden sm:inline`}>{m.status_text}</span>
               </div>
             )
           })}
           {lastRefreshTime ? (
-            <div className="px-2.5 py-1 rounded-full bg-background/70 border border-border/50 text-[11px] text-muted-foreground">
-              更新 <span className="font-mono text-foreground/90">{lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+            <div className="shrink-0 px-2 md:px-2.5 py-0.5 md:py-1 rounded-full bg-background/70 border border-border/50 text-[10px] md:text-[11px] text-muted-foreground">
+              <span className="hidden sm:inline">更新 </span>
+              <span className="font-mono text-foreground/90">{lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
           ) : null}
         </div>

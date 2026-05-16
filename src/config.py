@@ -48,7 +48,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TZ", "APP_TIMEZONE"),
     )
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        # .env 里可能有 HTTPS_PROXY 等未声明字段(httpx/系统标准变量),忽略不报错
+        "extra": "ignore",
+    }
 
 
 @dataclass

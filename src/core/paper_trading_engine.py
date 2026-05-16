@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.collectors.akshare_collector import _fetch_tencent_quotes, _tencent_symbol
+from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.models.market import MarketCode, MARKETS
 from src.web.database import SessionLocal
 from src.web.models import (
@@ -120,23 +120,26 @@ class PaperTradingEngine:
         return account
 
     def _fetch_quotes_map(self, symbols_markets: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
-        """批量获取报价，返回 {(market, symbol): quote_dict}"""
+        """批量获取报价，返回 {(market, symbol): quote_dict}
+
+        通过 QuoteOrchestrator 调度,支持多 provider 主备故障转移。
+        """
         grouped: dict[MarketCode, list[str]] = {}
         for symbol, market in symbols_markets:
             mc = _to_market(market)
             grouped.setdefault(mc, []).append(symbol)
 
+        orch = get_quote_orchestrator()
         out: dict[tuple[str, str], dict] = {}
         for market, symbols in grouped.items():
             if not symbols:
                 continue
-            tencent_syms = [_tencent_symbol(sym, market) for sym in symbols]
-            try:
-                rows = _fetch_tencent_quotes(tencent_syms)
-            except Exception as e:
-                logger.error(f"[模拟盘] 拉行情失败 {market.value}: {e}")
-                rows = []
-            by_symbol = {str(r.get("symbol")): r for r in rows}
+            req = ProviderRequest(symbols=tuple(symbols), market=market.value)
+            resp = orch.fetch_sync(req)
+            if not resp.success:
+                logger.error(f"[模拟盘] 拉行情失败 {market.value}: {resp.error}")
+                continue
+            by_symbol = {str(r.get("symbol")): r for r in (resp.data or [])}
             for sym in symbols:
                 q = by_symbol.get(sym)
                 if q:
@@ -476,13 +479,13 @@ class PaperTradingEngine:
             if not pos:
                 return {"ok": False, "error": "持仓不存在或已平仓"}
 
-            # 获取最新报价
+            # 获取最新报价(走 orchestrator,支持故障转移)
             mc = _to_market(pos.stock_market)
-            tsym = _tencent_symbol(pos.stock_symbol, mc)
-            try:
-                rows = _fetch_tencent_quotes([tsym])
-            except Exception:
-                rows = []
+            orch = get_quote_orchestrator()
+            resp = orch.fetch_sync(
+                ProviderRequest(symbols=(pos.stock_symbol,), market=mc.value)
+            )
+            rows = resp.data if resp.success and resp.data else []
 
             exit_price = pos.current_price or pos.entry_price
             if rows:

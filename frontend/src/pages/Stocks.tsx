@@ -1474,31 +1474,9 @@ export default function StocksPage() {
   return (
     <div>
       {/* Header */}
-      <div className="flex flex-col gap-3 mb-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-[20px] md:text-[22px] font-bold text-foreground tracking-tight">持仓</h1>
-            <div className="flex items-center gap-2 mt-1 flex-wrap">
-              {marketStatus.map(m => {
-                const statusColors: Record<string, string> = {
-                  trading: 'bg-emerald-500',
-                  pre_market: 'bg-amber-500',
-                  break: 'bg-amber-500',
-                  after_hours: 'bg-slate-400',
-                  closed: 'bg-slate-400',
-                }
-                return (
-                  <div key={m.code} className="flex items-center gap-1" title={`${m.sessions.join(', ')} (${m.local_time})`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${statusColors[m.status] || 'bg-slate-400'}`} />
-                    <span className="text-[11px] text-muted-foreground">{m.name}</span>
-                    <span className={`text-[10px] ${m.is_trading ? 'text-emerald-600' : 'text-muted-foreground/60'}`}>
-                      {m.status_text}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
+      <div className="flex flex-col gap-2 md:gap-3 mb-5 md:mb-6">
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-[18px] md:text-[22px] font-bold text-foreground tracking-tight shrink-0">持仓</h1>
           {/* Desktop buttons + controls */}
           <div className="hidden md:flex items-center gap-3">
             {/* Controls */}
@@ -1575,37 +1553,55 @@ export default function StocksPage() {
             </Button>
           </div>
         </div>
-        {/* Mobile Controls row */}
-        <div className="flex md:hidden items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-accent/30">
-            <div className="flex items-center gap-1">
-              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-90" />
-              <span className="text-[11px] text-muted-foreground">自动刷新</span>
-              {autoRefresh && (
-                <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
-                  <SelectTrigger className="h-6 w-14 text-[10px] px-1.5">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10s</SelectItem>
-                    <SelectItem value="30">30s</SelectItem>
-                    <SelectItem value="60">1分钟</SelectItem>
-                    <SelectItem value="120">2分钟</SelectItem>
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
+
+        {/* 移动端 row 2：市场状态 + 自动刷新 + 时间戳合并到同一行,横向滚动避免换行；桌面端只展示市场 pills (auto-refresh 在桌面顶部已展示) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1 md:flex-wrap md:overflow-visible">
+          {marketStatus.map(m => {
+            const statusColors: Record<string, string> = {
+              trading: 'bg-emerald-500',
+              pre_market: 'bg-amber-500',
+              break: 'bg-amber-500',
+              after_hours: 'bg-slate-400',
+              closed: 'bg-slate-400',
+            }
+            return (
+              <div
+                key={m.code}
+                className="shrink-0 flex items-center gap-1 md:gap-1.5"
+                title={`${m.sessions.join(', ')} (${m.local_time}) · ${m.status_text}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${statusColors[m.status] || 'bg-slate-400'}`} />
+                <span className="text-[11px] text-muted-foreground">{m.name}</span>
+                <span className={`text-[10px] ${m.is_trading ? 'text-emerald-600' : 'text-muted-foreground/60'} hidden sm:inline`}>
+                  {m.status_text}
+                </span>
+              </div>
+            )
+          })}
+          {/* 移动端紧凑型自动刷新控件 */}
+          <div className="flex md:hidden shrink-0 items-center gap-1 px-2 py-0.5 rounded-full bg-accent/30 ml-1">
+            <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="scale-75" />
+            {autoRefresh ? (
+              <Select value={refreshInterval.toString()} onValueChange={v => setRefreshInterval(parseInt(v))}>
+                <SelectTrigger className="h-5 w-12 text-[10px] px-1 border-0 bg-transparent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="10">10s</SelectItem>
+                  <SelectItem value="30">30s</SelectItem>
+                  <SelectItem value="60">1分钟</SelectItem>
+                  <SelectItem value="120">2分钟</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
+              <span className="text-[10px] text-muted-foreground">自动刷新</span>
+            )}
             {poolSuggestionsLoading && (
-              <>
-                <div className="w-px h-4 bg-border" />
-                <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                  <span className="w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-                </div>
-              </>
+              <span className="w-2.5 h-2.5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             )}
           </div>
           {lastRefreshTime && (
-            <span className="text-[10px] text-muted-foreground/60">
+            <span className="md:hidden shrink-0 text-[10px] text-muted-foreground/60 font-mono ml-1">
               {lastRefreshTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
             </span>
           )}
@@ -1862,31 +1858,31 @@ export default function StocksPage() {
                     {account.positions.length} 只
                   </span>
                 </div>
-                <div className="flex items-center justify-between md:justify-end gap-3 md:gap-6 pl-6 md:pl-0">
-                  <div className="flex items-center gap-3 md:gap-6">
+                <div className="flex items-center justify-between md:justify-end gap-2 md:gap-6 pl-6 md:pl-0">
+                  <div className="flex items-center gap-2.5 md:gap-6 min-w-0">
                     <div className="text-left md:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">市值</div>
-                      <div className="text-[12px] md:text-[13px] font-mono font-medium">{formatMoney(account.total_market_value)}</div>
+                      <div className="text-[12px] md:text-[13px] font-mono font-medium whitespace-nowrap">{formatMoney(account.total_market_value)}</div>
                     </div>
                     <div className="text-left md:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">盈亏</div>
-                      <div className={`text-[12px] md:text-[13px] font-mono font-medium ${account.total_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                      <div className={`text-[12px] md:text-[13px] font-mono font-medium whitespace-nowrap ${account.total_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
                         {account.total_pnl >= 0 ? '+' : ''}{formatMoney(account.total_pnl)}
-                        <span className="text-[10px] md:text-[11px] ml-1">({account.total_pnl_pct >= 0 ? '+' : ''}{account.total_pnl_pct.toFixed(2)}%)</span>
+                        <span className="text-[10px] md:text-[11px] ml-1 hidden md:inline">({account.total_pnl_pct >= 0 ? '+' : ''}{account.total_pnl_pct.toFixed(2)}%)</span>
                       </div>
                     </div>
                     <div className="text-left md:text-right">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">今日</div>
-                      <div className={`text-[12px] md:text-[13px] font-mono font-medium ${account.total_daily_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                      <div className={`text-[12px] md:text-[13px] font-mono font-medium whitespace-nowrap ${account.total_daily_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
                         {account.total_daily_pnl >= 0 ? '+' : ''}{formatMoney(account.total_daily_pnl)}
                       </div>
                     </div>
                     <div className="text-left md:text-right hidden sm:block">
                       <div className="text-[10px] md:text-[11px] text-muted-foreground">可用</div>
-                      <div className="text-[12px] md:text-[13px] font-mono">{formatMoney(account.available_funds)}</div>
+                      <div className="text-[12px] md:text-[13px] font-mono whitespace-nowrap">{formatMoney(account.available_funds)}</div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-0.5 md:gap-1" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center gap-0 md:gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                     <Button variant="ghost" size="icon" className="h-7 w-7 md:h-8 md:w-8" onClick={() => openPositionDialog(account.id)}>
                       <Plus className="w-3 md:w-3.5 h-3 md:h-3.5" />
                     </Button>
@@ -2140,61 +2136,74 @@ export default function StocksPage() {
                               className={`p-3 hover:bg-accent/30 transition-colors ${draggingPositionId === pos.id ? 'opacity-60' : ''}`}
                             >
                               {/* Row 1: Stock info + Current price */}
-                              <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className={`text-[9px] px-1 py-0.5 rounded ${badge.style}`}>{badge.label}</span>
-                                  <span className="font-mono text-[12px] font-semibold text-foreground">
+                              <div className="flex items-center justify-between gap-2 mb-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className={`shrink-0 text-[9px] px-1 py-0.5 rounded ${badge.style}`}>{badge.label}</span>
+                                  <span className="shrink-0 font-mono text-[12px] font-semibold text-foreground">
                                     {pos.symbol}
                                   </span>
                                   <button
-                                    className="text-[12px] text-muted-foreground hover:text-primary"
+                                    className="text-[12px] text-muted-foreground hover:text-primary truncate"
                                     onClick={() => openStockDetail(pos.symbol, pos.market, pos.name, true)}
                                   >
                                     {pos.name}
                                   </button>
                                   {pos.trading_style && (
-                                    <span className={`text-[9px] px-1 py-0.5 rounded ${pos.trading_style === 'short' ? 'bg-rose-500/10 text-rose-600' : pos.trading_style === 'long' ? 'bg-blue-500/10 text-blue-600' : 'bg-amber-500/10 text-amber-600'}`}>
+                                    <span className={`shrink-0 text-[9px] px-1 py-0.5 rounded ${pos.trading_style === 'short' ? 'bg-rose-500/10 text-rose-600' : pos.trading_style === 'long' ? 'bg-blue-500/10 text-blue-600' : 'bg-amber-500/10 text-amber-600'}`}>
                                       {pos.trading_style === 'short' ? '短' : pos.trading_style === 'long' ? '长' : '波'}
                                     </span>
                                   )}
-                                  {(() => {
-                                    const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
-                                    return (suggestion || kline) ? (
-                                      <SuggestionBadge
-                                        suggestion={suggestion}
-                                        stockName={pos.name}
-                                        stockSymbol={pos.symbol}
-                                        kline={kline}
-                                        market={pos.market}
-                                        hasPosition={true}
-                                      />
-                                    ) : null
-                                  })()}
                                 </div>
-                                <div className={`font-mono text-[13px] font-medium ${changeColor}`}>
+                                <div className={`font-mono text-[13px] font-medium whitespace-nowrap shrink-0 ${changeColor}`}>
                                   {pos.current_price?.toFixed(2) || '—'}
                                   {pos.change_pct != null && <span className="text-[11px] ml-1">{pos.change_pct >= 0 ? '+' : ''}{pos.change_pct.toFixed(2)}%</span>}
                                 </div>
                               </div>
-                              {/* Row 2: Details */}
-                              <div className="flex items-center justify-between text-[11px]">
-                                <div className="flex items-center gap-3">
-                                  <span className="text-muted-foreground">成本 <span className="font-mono text-foreground">{formatPrice(pos.cost_price)}</span></span>
-                                  <span className="text-muted-foreground">数量 <span className="font-mono text-foreground">{pos.quantity}</span></span>
-                                </div>
-                                <div className="flex items-center gap-3">
-                                  <div className={`font-mono ${pnlColor}`}>
-                                    {pos.pnl != null ? `${pos.pnl >= 0 ? '+' : ''}${formatMoney(pos.pnl)}` : '—'}
-                                    {pos.pnl_pct != null && <span className="ml-1">({pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(2)}%)</span>}
+                              {/* Row 2 (Suggestion badge, dedicated row to avoid wrapping mess) */}
+                              {(() => {
+                                const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
+                                return (suggestion || kline) ? (
+                                  <div className="mb-2">
+                                    <SuggestionBadge
+                                      suggestion={suggestion}
+                                      stockName={pos.name}
+                                      stockSymbol={pos.symbol}
+                                      kline={kline}
+                                      market={pos.market}
+                                      hasPosition={true}
+                                    />
                                   </div>
-                                  {pos.daily_pnl != null && (
-                                    <div className={`font-mono ${pos.daily_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
-                                      <span className="text-muted-foreground text-[10px]">今日</span> {pos.daily_pnl >= 0 ? '+' : ''}{formatMoney(pos.daily_pnl)}
+                                ) : null
+                              })()}
+                              {/* Row 3: Stats grid (4 cols, whitespace-nowrap to prevent "万" wrapping) */}
+                              <div className="grid grid-cols-4 gap-2 text-[11px]">
+                                <div className="min-w-0">
+                                  <div className="text-[10px] text-muted-foreground">成本</div>
+                                  <div className="font-mono text-foreground truncate" title={String(pos.cost_price)}>{formatPrice(pos.cost_price)}</div>
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-[10px] text-muted-foreground">数量</div>
+                                  <div className="font-mono text-foreground truncate" title={String(pos.quantity)}>{pos.quantity}</div>
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-[10px] text-muted-foreground">盈亏</div>
+                                  <div className={`font-mono whitespace-nowrap ${pnlColor}`}>
+                                    {pos.pnl != null ? `${pos.pnl >= 0 ? '+' : ''}${formatMoney(pos.pnl)}` : '—'}
+                                  </div>
+                                  {pos.pnl_pct != null && (
+                                    <div className={`text-[10px] font-mono ${pnlColor} opacity-80`}>
+                                      {pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(2)}%
                                     </div>
                                   )}
                                 </div>
+                                <div className="min-w-0">
+                                  <div className="text-[10px] text-muted-foreground">今日</div>
+                                  <div className={`font-mono whitespace-nowrap ${pos.daily_pnl != null ? (pos.daily_pnl >= 0 ? 'text-rose-500' : 'text-emerald-500') : 'text-muted-foreground'}`}>
+                                    {pos.daily_pnl != null ? `${pos.daily_pnl >= 0 ? '+' : ''}${formatMoney(pos.daily_pnl)}` : '—'}
+                                  </div>
+                                </div>
                               </div>
-                              {/* Row 3: Actions */}
+                              {/* Row 4: Actions */}
                               <div className="flex items-center justify-between mt-2 pt-2 border-t border-border/20">
                                 <div>
                                   {stock && stock.agents && stock.agents.length > 0 ? (

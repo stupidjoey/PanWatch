@@ -109,6 +109,15 @@ def update_setting(key: str, update: SettingUpdate, db: Session = Depends(get_db
 
     db.commit()
     db.refresh(setting)
+
+    # http_proxy 改动需要立刻反映到环境变量,否则 httpx 默认 Client 要重启才感知
+    if key == "http_proxy":
+        try:
+            from server import apply_proxy_env
+            apply_proxy_env(update.value)
+        except Exception:
+            pass
+
     return setting
 
 
