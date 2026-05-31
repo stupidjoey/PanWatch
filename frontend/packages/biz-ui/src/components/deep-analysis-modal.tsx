@@ -9,6 +9,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { buildAnalysisSections, type AnalysisSection } from '../analysis-sections'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@panwatch/base-ui/components/ui/tabs'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -305,7 +306,7 @@ export function DeepAnalysisModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-none w-[96vw] h-[94vh] max-h-[94vh] overflow-y-auto scrollbar">
+      <DialogContent className="w-[92vw] max-w-6xl max-h-[85vh] overflow-y-auto scrollbar">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             🧠 深度分析 · {stockName} ({stockSymbol})
@@ -330,6 +331,7 @@ export function DeepAnalysisModal({
 
         {stage === 'done' && result && <DoneView
           result={result}
+          stockSymbol={stockSymbol}
           onRerun={() => handleStart(true)}
         />}
 
@@ -613,9 +615,11 @@ function StageRow({ stage }: { stage: ProgressStage }) {
 
 function DoneView({
   result,
+  stockSymbol,
   onRerun,
 }: {
   result: DeepAnalysisResult
+  stockSymbol: string
   onRerun: () => void
 }) {
   // 防御性默认值:后端拉历史时可能 raw_data 缺失,这里给完整 fallback 避免白屏
@@ -630,17 +634,12 @@ function DoneView({
     agent_label: 'TradingAgents 深度',
     confidence: 5.0,
   }
-  const reports = rawData.analyst_reports || { market: '', social: '', news: '', fundamentals: '' }
-  const debate = rawData.debate_history
   const fromCache = rawData.from_cache
   const costUsd = rawData.cost_usd
-
-  // 最终决策 tab 只聚焦 PM + 交易员;研究主管裁决并入"看多看空辩论"、风控并入"风控辩论"(对称)
-  const decisionBody = [
-    rawData.final_decision && `### 🎯 PM 最终决策书\n\n${rawData.final_decision}`,
-    rawData.trader_plan && `### 💼 交易员执行计划\n\n${rawData.trader_plan}`,
-  ].filter(Boolean).join('\n\n')
-  const riskDebate = rawData.risk_debate
+  const sections = buildAnalysisSections(rawData)
+  const analysisDate = result.timestamp
+    ? String(result.timestamp).slice(0, 10)
+    : new Date().toISOString().slice(0, 10)
 
   return (
     <div className="space-y-4 text-[13px]">
@@ -661,13 +660,21 @@ function DoneView({
         <span className="text-[12px] text-muted-foreground">
           置信度 {sug.confidence?.toFixed(1) ?? '-'} / 10
         </span>
-        <span className="text-[10px] text-muted-foreground ml-auto">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-[11px] ml-auto"
+          onClick={() => window.open(`/analysis/${stockSymbol}/${analysisDate}`, '_blank')}
+        >
+          查看详细页
+        </Button>
+        <span className="text-[10px] text-muted-foreground">
           成本:${costUsd?.toFixed(4) ?? '-'}
         </span>
       </div>
 
-      {/* 统一 tab:主 tab=最终决策,次 tab=四位分析师 + 多空辩论(完整内容 + GFM 表格) */}
-      <AnalysisTabs decisionBody={decisionBody} reports={reports} debate={debate} riskDebate={riskDebate} />
+      {/* 统一 tab:最终决策 + 四位分析师 + 看多看空辩论 + 风控辩论(完整 + GFM 表格) */}
+      <AnalysisTabs sections={sections} />
 
       {/* 数据注入诊断(历史报告):从 raw_data.toolkit_diagnostic 拿 */}
       {rawData.toolkit_diagnostic && (
@@ -686,55 +693,23 @@ function DoneView({
   )
 }
 
-/** 决策与分析统一 tab:主 tab=最终决策(PM/交易员/研究主管/风控),次 tab=四位分析师 + 多空辩论。
- *  只渲染有内容的 tab,完整内容 + GFM 表格。 */
-function AnalysisTabs({
-  decisionBody,
-  reports,
-  debate,
-  riskDebate,
-}: {
-  decisionBody: string
-  reports: { market: string; social: string; news: string; fundamentals: string }
-  debate?: { history: string; judge_decision: string } | null
-  riskDebate?: { history: string; judge_decision: string } | null
-}) {
-  const items: { key: string; label: string; content: string }[] = []
-  // 主 tab:最终决策(PM + 交易员,默认选中)
-  if (decisionBody) items.push({ key: 'decision', label: '最终决策', content: decisionBody })
-  // 次 tab:四位分析师
-  ;(['market', 'social', 'news', 'fundamentals'] as const).forEach((k) => {
-    const text = (reports as unknown as Record<string, string>)[k] || ''
-    if (text) items.push({ key: k, label: STAGE_LABEL[`${k}_analyst`] || k, content: text })
-  })
-  // 次 tab:看多看空辩论(研究团队:辩论历史 + 研究主管裁决)
-  if (debate?.history) {
-    let dc = debate.history
-    if (debate.judge_decision) dc += `\n\n### ⚖️ 研究主管裁决\n\n${debate.judge_decision}`
-    items.push({ key: 'debate', label: '看多看空辩论', content: dc })
-  }
-  // 次 tab:风控辩论(风控团队:激进/中立/保守辩论 + 风控裁决)
-  if (riskDebate?.history) {
-    let rc = riskDebate.history
-    if (riskDebate.judge_decision) rc += `\n\n### 🛡️ 风控裁决\n\n${riskDebate.judge_decision}`
-    items.push({ key: 'risk', label: '风控辩论', content: rc })
-  }
-  if (items.length === 0) return null
-
+/** 决策与分析统一 tab。内容由 buildAnalysisSections 组装(弹窗与详细页共用),只渲染有内容的 tab。 */
+function AnalysisTabs({ sections }: { sections: AnalysisSection[] }) {
+  if (sections.length === 0) return null
   return (
     <div className="rounded-lg border border-border/50 p-4">
-      <Tabs defaultValue={items[0].key}>
+      <Tabs defaultValue={sections[0].id}>
         <TabsList>
-          {items.map((it) => (
-            <TabsTrigger key={it.key} value={it.key}>
-              {it.label}
+          {sections.map((s) => (
+            <TabsTrigger key={s.id} value={s.id}>
+              {s.title}
             </TabsTrigger>
           ))}
         </TabsList>
-        {items.map((it) => (
-          <TabsContent key={it.key} value={it.key}>
+        {sections.map((s) => (
+          <TabsContent key={s.id} value={s.id}>
             <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-table:text-[12px] prose-strong:text-foreground">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{s.markdown}</ReactMarkdown>
             </div>
           </TabsContent>
         ))}

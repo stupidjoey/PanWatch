@@ -10,6 +10,7 @@ import AgentsPage from '@/pages/Agents'
 import SettingsPage from '@/pages/Settings'
 import DataSourcesPage from '@/pages/DataSources'
 import HistoryPage from '@/pages/History'
+import AnalysisDetailPage from '@/pages/AnalysisDetail'
 import PriceAlertsPage from '@/pages/PriceAlerts'
 import PaperTradingPage from '@/pages/PaperTrading'
 import LoginPage from '@/pages/Login'
@@ -357,6 +358,7 @@ function App() {
           <Route path="/alerts" element={<PriceAlertsPage />} />
           <Route path="/datasources" element={<DataSourcesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/analysis/:symbol/:date" element={<AnalysisDetailPage />} />
         </Routes>
       </main>
       <ChatWidget />

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Clock, Trash2, FileText, ArrowLeft } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { fetchAPI } from '@panwatch/api'
@@ -38,6 +39,7 @@ const CAPABILITY_AGENT_KEYS = ['news_digest', 'chart_analyst']
 
 export default function HistoryPage() {
   const { toast } = useToast()
+  const navigate = useNavigate()
   const [records, setRecords] = useState<HistoryRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedAgent, setSelectedAgent] = useState<string>('all')
@@ -281,7 +283,20 @@ export default function HistoryPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    <Button variant="outline" size="sm" onClick={() => setDetailRecord(selectedRecord)}>查看详情</Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        // TradingAgents 深度记录 → 独立详细阅读页;其余 agent 维持原详情弹窗
+                        if (selectedRecord.agent_name === 'tradingagents' && selectedRecord.stock_symbol) {
+                          navigate(`/analysis/${selectedRecord.stock_symbol}/${selectedRecord.analysis_date}`)
+                        } else {
+                          setDetailRecord(selectedRecord)
+                        }
+                      }}
+                    >
+                      查看详情
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"

@@ -539,6 +539,41 @@ def get_tradingagents_latest(
     }
 
 
+@router.get("/tradingagents/analysis")
+def get_tradingagents_analysis(
+    stock_symbol: str = Query(..., description="股票代码"),
+    analysis_date: str = Query(..., description="分析日期 YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+):
+    """按 symbol + date 查某次 TradingAgents 深度分析完整结果(详细阅读页用)。"""
+    from src.web.models import AnalysisHistory
+
+    record = (
+        db.query(AnalysisHistory)
+        .filter(
+            AnalysisHistory.agent_name == "tradingagents",
+            AnalysisHistory.stock_symbol == stock_symbol,
+            AnalysisHistory.analysis_date == analysis_date,
+        )
+        .order_by(AnalysisHistory.updated_at.desc(), AnalysisHistory.id.desc())
+        .first()
+    )
+    if not record:
+        return None
+
+    return {
+        "id": record.id,
+        "agent_name": record.agent_name,
+        "stock_symbol": record.stock_symbol,
+        "analysis_date": record.analysis_date,
+        "title": record.title or "",
+        "content": record.content,
+        "raw_data": record.raw_data or {},
+        "created_at": _format_datetime(record.created_at),
+        "updated_at": _format_datetime(record.updated_at),
+    }
+
+
 @router.get("/tradingagents/history-comparison")
 def get_tradingagents_history_comparison(
     stock_symbol: str = Query(..., description="股票代码,如 300418"),

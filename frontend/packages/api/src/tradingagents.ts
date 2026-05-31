@@ -213,13 +213,31 @@ export const tradingAgentsApi = {
       `/agents/tradingagents/latest?stock_symbol=${encodeURIComponent(symbol)}`,
     ).then((item: unknown) => {
       if (!item || typeof item !== 'object') return null
-      const rec = item as { content?: string; title?: string; raw_data?: unknown }
+      const rec = item as { content?: string; title?: string; raw_data?: unknown; analysis_date?: string }
       if (!rec.content) return null
       return {
         agent_name: 'tradingagents',
         title: rec.title || '',
         content: rec.content || '',
         raw_data: (rec.raw_data || {}) as DeepAnalysisResult['raw_data'],
+        timestamp: rec.analysis_date,
+      }
+    })
+  },
+
+  /** 按 symbol + date 拉某次深度分析完整结果(详细阅读页用)。 */
+  getAnalysisByDate(symbol: string, date: string): Promise<DeepAnalysisResult | null> {
+    const qs = new URLSearchParams({ stock_symbol: symbol, analysis_date: date })
+    return fetchAPI(`/agents/tradingagents/analysis?${qs.toString()}`).then((item: unknown) => {
+      if (!item || typeof item !== 'object') return null
+      const rec = item as { content?: string; title?: string; raw_data?: unknown; analysis_date?: string }
+      if (!rec.content) return null
+      return {
+        agent_name: 'tradingagents',
+        title: rec.title || '',
+        content: rec.content || '',
+        raw_data: (rec.raw_data || {}) as DeepAnalysisResult['raw_data'],
+        timestamp: rec.analysis_date,
       }
     })
   },

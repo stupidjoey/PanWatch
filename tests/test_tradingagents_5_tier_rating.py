@@ -318,23 +318,34 @@ def test_social_report_fallback_when_no_sentiment():
     assert r.raw_data["analyst_reports"]["social"] == "旧情绪字段内容"
 
 
-def test_notify_is_overview_without_analyst_details():
-    """通知只发概览(content=决策链:PM/交易员/裁决),不含四位分析师/辩论详细内容。
-    notify_content 不单独设置(None),base.py 回退用 content。"""
+def test_notify_content_only_final_decision():
+    """通知体(notify_content)只放「最终决策」:决策摘要 + PM 最终决策书。
+    交易员执行计划 / 研究主管裁决 / 风控辩论 / 四位分析师都不进通知(避免过长被截断),
+    只在详情页;content(完整决策链)仍保留供历史/详情。"""
     state = {
-        "final_trade_decision": "最终交易决策：买入",
+        "final_trade_decision": "最终交易决策：买入\n\n核心逻辑:基本面拐点确认,估值修复在即",
+        "trader_investment_plan": "交易员计划:分三批建仓,首笔仓位 30%",
         "market_report": "技术分析详细内容" * 100,
-        "sentiment_report": "情绪" * 100,
-        "trader_investment_plan": "交易计划",
+        "sentiment_report": "情绪面详细" * 100,
+        "investment_debate_state": {"history": "多空辩论历史正文", "judge_decision": "研究主管裁决:倾向看多"},
+        "risk_debate_state": {"history": "风控三方辩论正文", "judge_decision": "风控团队结论:仓位可控"},
     }
     r = map_state_to_result(stock=_stock(), ta_result={"decision": "Buy", "final_state": state, "cost_usd": 0.01})
-    # 通知回退用 content(notify_content 未单独设置)
-    assert r.notify_content is None
-    # content(=通知内容)是决策链概览,不含四位分析师完整报告
-    assert state["market_report"] not in r.content
-    assert "四位分析师完整观点" not in r.content
-    # 但保留决策核心
+    # 通知体单独设置(不再回退 content)
+    assert r.notify_content is not None
+    nc = r.notify_content
+    # 含最终决策核心(决策摘要 + PM 决策书正文)
+    assert "最终决策" in nc
+    assert "买入" in nc
+    assert "基本面拐点确认" in nc
+    # 不含交易员计划 / 裁决 / 风控 / 分析师明细的具体内容
+    assert "分三批建仓" not in nc
+    assert "倾向看多" not in nc
+    assert "仓位可控" not in nc
+    assert state["market_report"] not in nc
+    # content(完整)仍含决策链(供详情页/历史)
     assert "PM 最终决策书" in r.content
+    assert "交易员执行计划" in r.content
 
 
 # ============================================================

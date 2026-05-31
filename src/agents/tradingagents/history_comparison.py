@@ -139,6 +139,9 @@ def build_history_comparison(
         action = (sug.get("action") or "hold").lower()
         confidence = sug.get("confidence")
         cost_usd = raw.get("cost_usd")
+        # 分析价优先用落库时存的"分析时实时价"(立即显示),K线 close 作 fallback
+        stored_price = raw.get("price_at_analysis")
+        stored_price = round(float(stored_price), 2) if isinstance(stored_price, (int, float)) else None
 
         base = _find_close_on_or_after(klines_by_date, r.analysis_date)
         if base is None:
@@ -149,7 +152,7 @@ def build_history_comparison(
                 "action_label": sug.get("action_label") or _action_to_label(action),
                 "confidence": confidence,
                 "cost_usd": cost_usd,
-                "price_at_analysis": None,
+                "price_at_analysis": stored_price,
                 "return_1d_pct": None,
                 "return_5d_pct": None,
                 "return_20d_pct": None,
@@ -172,7 +175,7 @@ def build_history_comparison(
             "action_label": sug.get("action_label") or _action_to_label(action),
             "confidence": confidence,
             "cost_usd": cost_usd,
-            "price_at_analysis": round(base_close, 2),
+            "price_at_analysis": stored_price if stored_price is not None else round(base_close, 2),
             "return_1d_pct": ret[1],
             "return_5d_pct": ret[5],
             "return_20d_pct": ret[20],

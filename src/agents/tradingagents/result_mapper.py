@@ -85,11 +85,21 @@ def map_state_to_result(
     }
 
     content = _render_markdown(state, suggestion, model_label, cost_usd)
+    # 详情页可点击链接(配了 panwatch_base_url 才出现)
+    from datetime import date as _date
+    from src.core.analysis_link import analysis_detail_markdown
+    _link = analysis_detail_markdown(stock.symbol, _date.today().isoformat())
+    if _link:
+        content = content.rstrip() + f"\n\n---\n{_link}"
+    # 通知体只放「最终决策」(决策摘要 + PM 决策书) + 详情链接;
+    # 交易员/研究主管/风控辩论/四分析师等完整内容都在详情页,避免通知过长被截断。
+    notify_content = _render_notify(state, suggestion, cost_usd, _link)
 
     return AnalysisResult(
         agent_name="tradingagents",
         title=f"【深度】{stock.name}({stock.symbol}):{suggestion['action_label']}",
         content=content,
+        notify_content=notify_content,
         raw_data={
             "suggestion": suggestion,
             "cost_usd": cost_usd,
@@ -269,6 +279,34 @@ def _extract_risk_debate(state: dict) -> dict:
         "history": rds.get("history", ""),
         "judge_decision": rds.get("judge_decision", ""),
     }
+
+
+def _render_notify(
+    state: dict, suggestion: dict, cost_usd: float, link_md: str = ""
+) -> str:
+    """通知体:只展示「最终决策」(决策摘要 + PM 最终决策书) + 详情链接。
+
+    交易员执行计划 / 研究主管裁决 / 风控辩论 / 四位分析师报告等完整内容都在详情页,
+    不进通知 —— 既符合"通知只看最终决策"的诉求,也避免推送过长被各渠道截断。
+    """
+    rating_raw = suggestion.get("rating_raw") or ""
+    rating_note = (
+        f"(评级:{RATING_LABEL_MAP.get(rating_raw, '持有')})"
+        if rating_raw in RATING_LABEL_MAP else ""
+    )
+    parts = [
+        f"## 最终决策\n\n"
+        f"**{suggestion['action_label']}** {rating_note} · 置信度 {suggestion['confidence']:.1f}/10\n"
+    ]
+    final_text = (state.get("final_trade_decision") or "").strip()
+    if final_text:
+        parts.append(final_text + "\n")
+    parts.append(
+        f"\n_成本 ${cost_usd:.4f} · 交易员 / 研究主管 / 风控辩论 / 四分析师完整内容见详情_"
+    )
+    if link_md:
+        parts.append(f"\n\n{link_md}")
+    return "\n".join(parts)
 
 
 def _render_markdown(

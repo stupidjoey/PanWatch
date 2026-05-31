@@ -42,6 +42,9 @@ def sanitize_for_telegram(content: str) -> str:
     content = re.sub(r"<br\s*/?>", "\n", content)
 
     # 移除 Markdown 格式
+    # markdown 链接 [label](url) → "label url":Telegram 内联链接对 localhost/IP:端口 等
+    # 非公网地址不渲染(标签退化成纯文本点不了),裸 URL 则会被自动识别为可点击,更稳。
+    content = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"\1 \2", content)
     content = re.sub(r"^#{1,6}\s*", "", content, flags=re.MULTILINE)  # 移除标题 #
     content = re.sub(r"\*\*(.+?)\*\*", r"\1", content)  # 移除粗体 **
     content = re.sub(r"\*(.+?)\*", r"\1", content)  # 移除斜体 *
@@ -384,7 +387,14 @@ class NotifierManager:
         text = f"*{safe_title}*\n\n{safe_content}" if safe_title else safe_content
         # Telegram 单条上限 4096,留点 buffer 给末尾提示
         if len(text) > 3900:
-            text = text[:3900].rstrip() + "\n\n…内容过长已截断,完整报告请在 PanWatch 查看"
+            # 正文末尾若带详情链接(经 sanitize 后已是裸 URL),直接截断会把它砍掉 →
+            # 用户点不到。先抽出来,截断正文后再拼回末尾。
+            link_m = re.search(r"(https?://[^\s)]+)\s*$", text)
+            if link_m:
+                notice = f"\n\n…内容过长已截断,完整报告 👉 {link_m.group(1)}"
+            else:
+                notice = "\n\n…内容过长已截断,完整报告请在 PanWatch 查看"
+            text = text[: 3900 - len(notice)].rstrip() + notice
         payload = {
             "chat_id": chat_id,
             "text": text,
