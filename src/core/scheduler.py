@@ -5,6 +5,7 @@ from typing import Callable, Awaitable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.agents.base import BaseAgent, AgentContext
+from src.collectors.kline_collector import kline_source
 from src.core.agent_runs import record_agent_run
 from src.core.log_context import log_context
 from src.models.market import MARKETS
@@ -98,7 +99,8 @@ class AgentScheduler:
                             )
                             continue
                         try:
-                            res = await agent.run_single(context, stock.symbol)  # type: ignore[attr-defined]
+                            with kline_source(f"agent:{agent_name}"):
+                                res = await agent.run_single(context, stock.symbol)  # type: ignore[attr-defined]
                             processed += 1
                             try:
                                 notify_error = (
@@ -131,7 +133,8 @@ class AgentScheduler:
                         model_label=context.model_label,
                     )
                 else:
-                    result = await agent.run(context)
+                    with kline_source(f"agent:{agent_name}"):
+                        result = await agent.run(context)
                     duration_ms = int((time.monotonic() - start) * 1000)
                     notify_error = ""
                     try:

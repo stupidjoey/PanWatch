@@ -7,8 +7,18 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.core.paper_trading_engine import ENGINE
+from src.models.market import MARKETS, MarketCode
 
 logger = logging.getLogger(__name__)
+
+
+def _any_market_trading() -> bool:
+    """CN/HK/US 任一在交易时段即为 True。全休市时行情不动,扫描可跳过(行为中性)。"""
+    for m in (MarketCode.CN, MarketCode.HK, MarketCode.US):
+        md = MARKETS.get(m)
+        if md and md.is_trading_time():
+            return True
+    return False
 
 
 class PaperTradingScheduler:
@@ -20,6 +30,9 @@ class PaperTradingScheduler:
     async def _scan_job(self):
         if self._running:
             logger.debug("[模拟盘] 上轮扫描仍在执行，跳过本轮")
+            return
+        if not _any_market_trading():
+            logger.debug("[模拟盘] 全市场休市,跳过本轮扫描")
             return
         self._running = True
         try:

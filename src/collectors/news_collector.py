@@ -9,6 +9,7 @@ import asyncio
 
 import httpx
 
+from src.collectors.market_http import source_suffix
 from src.core.cn_symbol import get_cn_prefix
 
 logger = logging.getLogger(__name__)
@@ -517,7 +518,7 @@ class EastMoneyNewsCollector(BaseNewsCollector):
             return result
 
         except Exception as e:
-            logger.warning(f"东方财富公告采集失败: {e}")
+            logger.warning(f"东方财富公告采集失败: {e}{source_suffix()}")
             return []
 
     def _parse_item(self, item: dict, symbol: str) -> NewsItem | None:
@@ -651,7 +652,7 @@ class NewsCollector:
                 since = announcement_since if collector.source == "eastmoney" else news_since
                 return await collector.fetch_news(symbols, since)
             except Exception as e:
-                logger.error(f"采集器 {collector.source} 失败: {e}")
+                logger.error(f"采集器 {collector.source} 失败: {e}{source_suffix()}")
                 return []
 
         # 并发采集所有数据源

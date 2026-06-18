@@ -3,8 +3,12 @@ from dataclasses import dataclass
 
 import httpx
 
+from src.collectors.market_http import TTLCache, source_suffix
 
 logger = logging.getLogger(__name__)
+
+# 异动/热门榜单为盘中分钟级数据:短 TTL 缓存,避免市场扫描重复拉。
+_DISCOVERY_CACHE = TTLCache(default_ttl_sec=90.0)
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,11 @@ class EastMoneyDiscoveryCollector:
         return result
 
     async def _get_json(self, url: str, *, params: dict) -> dict:
+        cache_key = f"{url}?{sorted((params or {}).items())}"
+        cached = _DISCOVERY_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -212,13 +221,15 @@ class EastMoneyDiscoveryCollector:
                     timeout=timeout,
                     verify=self.verify_ssl,
                     follow_redirects=True,
-                    trust_env=True,
+                    trust_env=False,  # 不吃 env 代理(Telegram/AI 用),仅用显式配置的 self.proxy
                     headers=headers,
                     proxy=self.proxy,
                 ) as client:
                     resp = await client.get(url, params=params)
                     resp.raise_for_status()
-                    return resp.json()
+                    data = resp.json()
+                    _DISCOVERY_CACHE.set(cache_key, data)
+                    return data
             except Exception as e:
                 last_exc = e
                 if attempt < attempts - 1:
@@ -232,6 +243,6 @@ class EastMoneyDiscoveryCollector:
 
         if last_exc is not None:
             logger.warning(
-                f"EastMoney discovery request failed: {type(last_exc).__name__}: {last_exc!r}"
+                f"EastMoney discovery request failed: {type(last_exc).__name__}: {last_exc!r}{source_suffix()}"
             )
         return {}

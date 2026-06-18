@@ -3,8 +3,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-import httpx
-
+from src.collectors.market_http import TTLCache, market_get, source_suffix
 from src.core.cn_symbol import is_cn_sh
 from src.models.market import MarketCode
 
@@ -12,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 # 东方财富资金流向 API
 EASTMONEY_FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+
+# 资金流为日级数据、变动慢:中等 TTL 缓存 + 按 host 节流,避免直连调用每轮重复拉。
+_FLOW_HOST = "push2his.eastmoney.com"
+_FLOW_MIN_INTERVAL_S = 0.2
+_FLOW_CACHE = TTLCache(default_ttl_sec=600.0)
 
 
 @dataclass
@@ -58,7 +62,12 @@ class CapitalFlowCollector:
         self.market = market
 
     def get_capital_flow(self, symbol: str) -> CapitalFlow | None:
-        """获取单只股票的资金流向"""
+        """获取单只股票的资金流向(直连 + 节流 + 退避重试 + TTL缓存)。"""
+        cache_key = f"{self.market.value}:{symbol}"
+        cached = _FLOW_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         secid = _get_eastmoney_secid(symbol, self.market)
 
         params = {
@@ -76,13 +85,22 @@ class CapitalFlowCollector:
             "Referer": "https://quote.eastmoney.com/",
         }
 
-        try:
-            with httpx.Client(
-                follow_redirects=True, timeout=8, trust_env=False
-            ) as client:  # 行情直连,绕过 env 代理(生产代理会拦 push2his.eastmoney)
-                resp = client.get(EASTMONEY_FLOW_URL, params=params, headers=headers)
-                data = resp.json()
+        data = market_get(
+            EASTMONEY_FLOW_URL,
+            host_key=_FLOW_HOST,
+            params=params,
+            headers=headers,
+            min_interval_s=_FLOW_MIN_INTERVAL_S,
+            timeout=8,
+            retries=2,
+            parse="json",
+            symbol=symbol,
+            log_label="资金流",
+        )
+        if not data:
+            return None
 
+        try:
             if data.get("data") is None:
                 logger.warning(f"没有 data 数据 获取 {symbol} 资金流向失败: 无数据")
                 return None
@@ -135,10 +153,11 @@ class CapitalFlowCollector:
             # print(f"小单净流入: {capital_flow.small_net_inflow:,.2f} 元")
             # print(f"5日主力净流入: {capital_flow.main_net_5d:,.2f} 元")
 
+            _FLOW_CACHE.set(cache_key, capital_flow)
             return capital_flow
 
         except Exception as e:
-            logger.error(f"获取 {symbol} 资金流向失败: {e}")
+            logger.error(f"解析 {symbol} 资金流向失败: {e}{source_suffix()}")
             return None
 
     def get_capital_flow_summary(self, symbol: str) -> dict:

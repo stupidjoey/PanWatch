@@ -1336,11 +1336,15 @@ if os.path.exists(static_dir):
 if __name__ == "__main__":
     print("盯盘侠启动: http://127.0.0.1:8000")
     print("API 文档: http://127.0.0.1:8000/docs")
+    # 生产(Docker `python server.py`)不应开 reload:uvicorn 文件监听会多起一个 reloader
+    # 子进程、浪费资源,且监听 data/ 写入易误触发重启。本地热重载用 `make dev-api`
+    # (uvicorn --reload),或显式设 DEV_RELOAD=1。
+    _dev_reload = os.environ.get("DEV_RELOAD", "").lower() in ("1", "true", "yes")
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
-        reload_dirs=["src", "."],
-        reload_excludes=["data/*", "frontend/*", ".claude/*"],
+        reload=_dev_reload,
+        reload_dirs=["src", "."] if _dev_reload else None,
+        reload_excludes=["data/*", "frontend/*", ".claude/*"] if _dev_reload else None,
     )

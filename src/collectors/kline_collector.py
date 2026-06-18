@@ -12,8 +12,9 @@ import random
 import threading
 import time
 
+from src.collectors.market_http import fetch_source, source_suffix
 from src.core.cn_symbol import get_cn_prefix, is_cn_sh
-from src.models.market import MarketCode
+from src.models.market import MARKETS, MarketCode
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,35 @@ _STOOQ_CACHE: dict[str, tuple[float, list["KlineData"]]] = {}
 _STOOQ_CACHE_TTL_SECONDS = 300
 _EASTMONEY_CACHE: dict[str, tuple[float, int, list["KlineData"]]] = {}
 _EASTMONEY_CACHE_TTL_SECONDS = 300
+
+
+# 调用来源标记统一在 market_http(全项目共享一个 contextvar)。
+# 保留 kline_source / _source_suffix 名称,兼容已有调用方(schedulers 等)。
+kline_source = fetch_source
+_source_suffix = source_suffix
+
+
+# ── K线按市场状态缓存 ──────────────────────────────────────────────────────
+# 日K一天只定稿一次(收盘后),但调度任务每轮都逐只重新联网拉 → 批量突发触发限流。
+# 交易时段用短 TTL(末根K线盘中会动),收盘后用长 TTL(数据已定稿,无需重复拉)。
+_KLINE_CACHE: dict[str, tuple[float, int, list["KlineData"]]] = {}
+_KLINE_TTL_TRADING_S = 180
+_KLINE_TTL_CLOSED_S = 1800
+
+
+def _kline_cache_ttl(market: MarketCode) -> float:
+    try:
+        md = MARKETS.get(market)
+        if md and md.is_trading_time():
+            return _KLINE_TTL_TRADING_S
+    except Exception:
+        pass
+    return _KLINE_TTL_CLOSED_S
+
+
+def clear_kline_cache() -> None:
+    """清空 K线内存缓存(测试隔离用)。"""
+    _KLINE_CACHE.clear()
 
 
 def _fetch_stooq_us_klines(symbol: str) -> list[KlineData]:
@@ -156,6 +186,7 @@ def _fetch_eastmoney_klines(
     last_err = None
     best: list[KlineData] = []
     for attempt in range(2):
+        _throttle_eastmoney()
         try:
             with httpx.Client(
                 follow_redirects=True,
@@ -200,7 +231,9 @@ def _fetch_eastmoney_klines(
             time.sleep(0.35 * (attempt + 1))
 
     if not best and last_err is not None:
-        logger.warning(f"Eastmoney 获取 {symbol} K线失败: {last_err}")
+        logger.warning(
+            f"Eastmoney 获取 {symbol} K线失败: {last_err}{_source_suffix()}"
+        )
         stale = _EASTMONEY_CACHE.get(cache_key)
         if stale:
             bars = stale[2]
@@ -498,6 +531,56 @@ def _throttle_tencent() -> None:
         _tencent_last_call[0] = time.time()
 
 
+# 东方财富 push2his 在批量突发下会连接级丢弃(Server disconnected) —— 同样做进程级节流。
+_EASTMONEY_MIN_INTERVAL_S = 0.2
+_EASTMONEY_THROTTLE_LOCK = threading.Lock()
+_eastmoney_last_call = [0.0]
+
+
+def _throttle_eastmoney() -> None:
+    """进程级限速:东方财富兜底请求间隔 ≥ _EASTMONEY_MIN_INTERVAL_S,缓解批量突发被连接级拒绝。"""
+    with _EASTMONEY_THROTTLE_LOCK:
+        wait = _EASTMONEY_MIN_INTERVAL_S - (time.time() - _eastmoney_last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _eastmoney_last_call[0] = time.time()
+
+
+def _fetch_tencent_klines(
+    symbol: str, market: MarketCode, days: int
+) -> list[KlineData]:
+    """腾讯主路径取日K:进程级节流 + 空响应/异常退避重试(gtimg 批量突发常限流回空 body,重试可自愈)。"""
+    tencent_sym = _tencent_symbol(symbol, market)
+    params = {
+        "param": f"{tencent_sym},day,,,{days},qfq",
+        "_var": "kline_dayqfq",
+    }
+    klines: list[KlineData] = []
+    last_err = None
+    for attempt in range(3):
+        _throttle_tencent()
+        try:
+            with httpx.Client(
+                follow_redirects=True, timeout=10 + attempt * 4, trust_env=False
+            ) as client:  # 行情直连,绕过 env 代理(生产代理会拦行情接口)
+                resp = client.get(TENCENT_KLINE_URL, params=params)
+                text = resp.text
+            klines = _parse_tencent_kline_text(text, tencent_sym)
+            if klines:
+                break
+            last_err = "空响应"  # gtimg 突发限流常回空 body,退避后重试
+        except Exception as e:
+            last_err = e
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1) + random.uniform(0, 0.25))
+
+    if not klines and last_err is not None:
+        logger.warning(
+            f"腾讯 K线获取失败(已重试)symbol={symbol}: {last_err}{_source_suffix()}"
+        )
+    return klines
+
+
 def _parse_tencent_kline_text(text: str, tencent_sym: str) -> list[KlineData]:
     """解析腾讯 K 线 JS 变量响应(kline_dayqfq={...})为 KlineData;空/异常返回 []。"""
     if not text or "=" not in text:
@@ -543,42 +626,26 @@ class KlineCollector:
         self.market = market
 
     def get_klines(self, symbol: str, days: int = 60) -> list[KlineData]:
-        """获取日K线数据"""
-        tencent_sym = _tencent_symbol(symbol, self.market)
+        """获取日K线数据(按市场状态缓存,避免调度任务每轮重复联网触发限流)。"""
+        cache_key = f"{self.market.value}:{symbol}"
+        need = max(1, int(days or 1))
+        now = time.time()
+        cached = _KLINE_CACHE.get(cache_key)
+        if (
+            cached
+            and (now - cached[0]) < _kline_cache_ttl(self.market)
+            and cached[1] >= need
+        ):
+            bars = cached[2]
+            return bars[-need:] if len(bars) > need else bars
 
-        params = {
-            "param": f"{tencent_sym},day,,,{days},qfq",
-            "_var": "kline_dayqfq",
-        }
-
-        # 腾讯主路径:进程级节流 + 重试退避(gtimg 在批量/并发突发下常限流回空 body,重试可自愈)
-        klines: list[KlineData] = []
-        last_err = None
-        for attempt in range(3):
-            _throttle_tencent()
-            try:
-                with httpx.Client(
-                    follow_redirects=True, timeout=10 + attempt * 4, trust_env=False
-                ) as client:  # 行情直连,绕过 env 代理(生产代理会拦行情接口)
-                    resp = client.get(TENCENT_KLINE_URL, params=params)
-                    text = resp.text
-                klines = _parse_tencent_kline_text(text, tencent_sym)
-                if klines:
-                    break
-                last_err = "空响应"  # gtimg 突发限流常回空 body,退避后重试
-            except Exception as e:
-                last_err = e
-            if attempt < 2:
-                time.sleep(0.4 * (attempt + 1) + random.uniform(0, 0.25))
-
-        if not klines and last_err is not None:
-            logger.warning(f"腾讯 K线获取失败(已重试)symbol={symbol}: {last_err}")
+        klines = _fetch_tencent_klines(symbol, self.market, days)
 
         # Tencent 对部分美股返回的 day 数据异常偏少（仅 1-2 条），使用 Stooq 回退。
         if self.market == MarketCode.US and len(klines) < max(10, min(days, 30)):
             fallback = _fetch_stooq_us_klines(symbol)
             if fallback:
-                return fallback[-days:]
+                klines = fallback
 
         # CN/HK: Tencent 不足时用 Eastmoney 补全更长历史(仅当确实不足)
         if self.market in (MarketCode.CN, MarketCode.HK):
@@ -587,13 +654,19 @@ class KlineCollector:
                     symbol, self.market, min(max(days, 3000), 20000)
                 )
                 if len(em) > len(klines):
-                    return em[-days:] if len(em) > days else em
+                    klines = em
 
-        return klines
+        # 只缓存非空结果:数据源短暂故障时不把"空"固化,下轮可重试。
+        if klines:
+            _KLINE_CACHE[cache_key] = (now, len(klines), list(klines))
+        return klines[-need:] if len(klines) > need else klines
 
-    def get_technical_indicators(self, symbol: str) -> TechnicalIndicators:
-        """计算技术指标"""
-        klines = self.get_klines(symbol, days=120)
+    def get_technical_indicators(
+        self, symbol: str = "", klines: list[KlineData] | None = None
+    ) -> TechnicalIndicators:
+        """计算技术指标(可传入已取的 klines 复用,避免重复联网)。"""
+        if klines is None:
+            klines = self.get_klines(symbol, days=120)
 
         if not klines:
             return TechnicalIndicators()
@@ -748,11 +821,10 @@ class KlineCollector:
 
     def get_kline_summary(self, symbol: str) -> dict:
         """获取 K 线摘要（用于 prompt 和前端展示）"""
-        klines = self.get_klines(symbol, days=30)
-        indicators = self.get_technical_indicators(symbol)
-
+        klines = self.get_klines(symbol, days=120)
         if not klines:
             return {"error": "无K线数据"}
+        indicators = self.get_technical_indicators(klines=klines)
 
         # 最近5日表现
         recent_5 = klines[-5:] if len(klines) >= 5 else klines

@@ -5,6 +5,7 @@ from datetime import datetime
 
 import httpx
 
+from src.collectors.market_http import TTLCache, market_get
 from src.core.cn_symbol import get_cn_prefix
 from src.models.market import MarketCode, StockData, IndexData
 
@@ -12,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 # 腾讯股票行情 API（HTTP，GBK 编码）
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
+
+# 实时报价短 TTL 缓存 + 按 host 节流:平抑模拟盘/价格提醒每 60s 的批量并发突发。
+_QUOTE_HOST = "qt.gtimg.cn"
+_QUOTE_MIN_INTERVAL_S = 0.15
+_QUOTE_CACHE = TTLCache(default_ttl_sec=5.0)
 
 # 预定义指数
 CN_INDICES = [
@@ -103,6 +109,9 @@ def _parse_tencent_line(line: str) -> dict | None:
             circulating_market_value = _to_float(parts[44])
             total_market_value = _to_float(parts[45])
 
+        # 量比在 parts[49](腾讯行情字段)。价格提醒直接用它,免再拉 K线算 5 日均量。
+        volume_ratio = _to_float(parts[49]) if len(parts) > 49 else None
+
         return {
             "name": parts[1],
             "symbol": symbol,
@@ -116,6 +125,7 @@ def _parse_tencent_line(line: str) -> dict | None:
             "low_price": float(parts[34] or 0),
             "turnover": turnover,
             "turnover_rate": turnover_rate,
+            "volume_ratio": volume_ratio,
             "pe_ratio": pe_ratio,
             "circulating_market_value": circulating_market_value,
             "total_market_value": total_market_value,
@@ -126,19 +136,38 @@ def _parse_tencent_line(line: str) -> dict | None:
 
 
 def _fetch_tencent_quotes(symbols: list[str]) -> list[dict]:
-    """批量获取腾讯实时行情"""
+    """批量获取腾讯实时行情(直连 + 按 host 节流 + 退避重试 + 短TTL缓存)。"""
     if not symbols:
         return []
-    url = TENCENT_QUOTE_URL + ",".join(symbols)
-    with httpx.Client(trust_env=False) as client:  # 行情直连,绕过 env 代理
-        resp = client.get(url, timeout=10)
-        content = resp.content.decode("gbk", errors="ignore")
+    cache_key = ",".join(symbols)
+    cached = _QUOTE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    content = market_get(
+        TENCENT_QUOTE_URL + cache_key,
+        host_key=_QUOTE_HOST,
+        min_interval_s=_QUOTE_MIN_INTERVAL_S,
+        timeout=10,
+        retries=2,
+        parse="content",  # GBK,手动解码
+        log_label="腾讯报价",
+    )
+    if not content:
+        return []
+    text = (
+        content.decode("gbk", errors="ignore")
+        if isinstance(content, (bytes, bytearray))
+        else str(content)
+    )
 
     results = []
-    for line in content.strip().split(";"):
+    for line in text.strip().split(";"):
         parsed = _parse_tencent_line(line)
         if parsed and parsed["current_price"] > 0:
             results.append(parsed)
+    if results:
+        _QUOTE_CACHE.set(cache_key, results)
     return results
 
 

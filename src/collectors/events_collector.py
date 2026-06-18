@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from src.collectors.market_http import source_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class EastMoneyEventsCollector:
 
         if last_exc is not None:
             self.last_error = f"{type(last_exc).__name__}: {last_exc!r}"
-            logger.warning(f"EastMoney 事件采集失败: {self.last_error}")
+            logger.warning(f"EastMoney 事件采集失败: {self.last_error}{source_suffix()}")
         return []
 
     def _parse_item(self, item: dict, stock_codes: list[str]) -> EventItem | None:
