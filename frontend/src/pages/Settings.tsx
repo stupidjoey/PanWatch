@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Check, Eye, EyeOff, Plus, Pencil, Trash2, Star, Send, Cpu, Play, Download, Upload, FileJson, BarChart3, TrendingUp } from 'lucide-react'
 import { fetchAPI, type AIService, type AIModel, type NotifyChannel } from '@panwatch/api'
+import { useAvatar, saveAvatar, fileToAvatarDataUrl } from '@/hooks/use-avatar'
 import { Input } from '@panwatch/base-ui/components/ui/input'
 import { Label } from '@panwatch/base-ui/components/ui/label'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -169,6 +170,11 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState<number | null>(null)
   const [testingModel, setTestingModel] = useState<number | null>(null)
 
+  // 头像
+  const avatar = useAvatar()
+  const avatarFileRef = useRef<HTMLInputElement | null>(null)
+  const [avatarSaving, setAvatarSaving] = useState(false)
+
   // Templates (config pack)
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge')
   const [importing, setImporting] = useState(false)
@@ -318,6 +324,34 @@ export default function SettingsPage() {
   }
 
   useEffect(() => { load(); loadFeedbackStats() }, [])
+
+  const onPickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // 允许重复选择同一文件
+    if (!file) return
+    setAvatarSaving(true)
+    try {
+      const dataUrl = await fileToAvatarDataUrl(file)
+      await saveAvatar(dataUrl)
+      toast('头像已更新', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '头像保存失败', 'error')
+    } finally {
+      setAvatarSaving(false)
+    }
+  }
+
+  const onRemoveAvatar = async () => {
+    setAvatarSaving(true)
+    try {
+      await saveAvatar('')
+      toast('头像已移除', 'success')
+    } catch {
+      toast('操作失败', 'error')
+    } finally {
+      setAvatarSaving(false)
+    }
+  }
 
   const handleSave = async (key: string) => {
     setSaving(key)
@@ -560,22 +594,34 @@ export default function SettingsPage() {
         <div className="relative flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <div className="h-8 w-8 rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-white shadow-sm flex items-center justify-center">
-                <TrendingUp className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-foreground/90">PanWatch</span>
-                  <span className="rounded-full border border-border/50 bg-background/70 px-2 py-0.5 text-[10px] text-muted-foreground">Console</span>
-                </div>
-              </div>
-              {version ? <span className="opacity-60">v{version}</span> : null}
-              {health?.timezone ? (
-                <span className="opacity-60">TZ {health.timezone}</span>
+              <input ref={avatarFileRef} type="file" accept="image/*" className="hidden" onChange={onPickAvatar} />
+              <button
+                type="button"
+                onClick={() => avatarFileRef.current?.click()}
+                disabled={avatarSaving}
+                title="点击上传头像"
+                className="group relative h-9 w-9 rounded-full overflow-hidden bg-gradient-to-br from-primary to-primary/70 text-white shadow-sm flex items-center justify-center ring-1 ring-border/40 hover:ring-primary/40 transition-all shrink-0"
+              >
+                {avatar ? (
+                  <img src={avatar} alt="头像" className="w-full h-full object-cover" />
+                ) : (
+                  <TrendingUp className="w-4 h-4" />
+                )}
+                <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Upload className="w-3.5 h-3.5 text-white" />
+                </span>
+              </button>
+              {avatar ? (
+                <button
+                  type="button"
+                  onClick={onRemoveAvatar}
+                  disabled={avatarSaving}
+                  className="opacity-60 hover:text-destructive hover:opacity-100 transition-colors"
+                >
+                  移除头像
+                </button>
               ) : null}
             </div>
-            <h1 className="mt-1 text-[22px] md:text-[26px] font-bold text-foreground tracking-tight">设置</h1>
-            <p className="mt-1 text-[12px] md:text-[13px] text-muted-foreground">AI、通知与系统偏好。把“信息密度”和“打扰”调到你的手感。</p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <div className="px-2.5 py-1 rounded-full bg-background/70 border border-border/50 text-[11px] text-muted-foreground">

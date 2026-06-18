@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { Moon, Sun, Monitor, Check, LogOut, User, type LucideIcon } from 'lucide-react'
 import { isAuthenticated, logout } from '@panwatch/api'
 import type { ThemeMode } from '@/hooks/use-theme'
+import { useAvatar } from '@/hooks/use-avatar'
 
 export interface AccountNavItem {
   to: string
@@ -39,6 +40,11 @@ export default function AccountMenu({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   const location = useLocation()
+  const avatar = useAvatar()
+  // 仅在支持 hover 的设备(PC)启用悬停展开;触屏维持点击
+  const [canHover] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches,
+  )
 
   // 点击外部关闭
   useEffect(() => {
@@ -56,23 +62,35 @@ export default function AccountMenu({
     setOpen(false)
   }, [location.pathname])
 
-  const avatarSize = size === 'sm' ? 'w-8 h-8' : 'w-9 h-9'
+  const avatarSize = size === 'sm' ? 'w-6 h-6' : 'w-7 h-7'
+  const iconSize = size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'
 
   return (
-    <div className="relative" ref={ref}>
+    <div
+      className="relative"
+      ref={ref}
+      onMouseEnter={canHover ? () => setOpen(true) : undefined}
+      onMouseLeave={canHover ? () => setOpen(false) : undefined}
+    >
       <button
         onClick={() => setOpen(v => !v)}
-        className={`${avatarSize} rounded-full bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-sm ring-1 transition-all ${
+        className={`${avatarSize} rounded-full overflow-hidden bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-sm ring-1 transition-all ${
           open ? 'ring-primary/50' : 'ring-border/40 hover:ring-primary/40'
         }`}
         title="账户与设置"
         aria-label="账户与设置"
       >
-        <User className="w-4 h-4 text-white" />
+        {avatar ? (
+          <img src={avatar} alt="头像" className="w-full h-full object-cover" />
+        ) : (
+          <User className={`${iconSize} text-white`} />
+        )}
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-48 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl z-50">
+        // top-full + pt-2:用透明内边距桥接头像与菜单,hover 移入不断开
+        <div className="absolute right-0 top-full pt-2 z-50">
+          <div className="w-48 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl">
           {/* 原“更多”导航 */}
           {navItems.map(({ to, icon: Icon, label }) => {
             const isActive = location.pathname.startsWith(to)
@@ -128,6 +146,7 @@ export default function AccountMenu({
               </button>
             </>
           )}
+          </div>
         </div>
       )}
     </div>

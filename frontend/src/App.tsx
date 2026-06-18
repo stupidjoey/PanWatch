@@ -162,24 +162,22 @@ function App() {
               })}
             </nav>
 
-            {/* 外侧:GitHub + 日志;头像下拉:更多导航 + 主题色 + 退出登录 */}
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
-                <button
-                  onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
-                  className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                  title="GitHub 项目"
-                >
-                  <Github className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setLogsOpen(true)}
-                  className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                  title="查看日志"
-                >
-                  <ScrollText className="w-4 h-4" />
-                </button>
-              </div>
+            {/* action wrapper:GitHub + 日志 + 头像(头像下拉含更多导航/主题色/退出) */}
+            <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
+              <button
+                onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
+                className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
+                title="GitHub 项目"
+              >
+                <Github className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setLogsOpen(true)}
+                className="w-9 h-9 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
+                title="查看日志"
+              >
+                <ScrollText className="w-4 h-4" />
+              </button>
               <AccountMenu
                 navItems={desktopMoreNavItems}
                 mode={mode}
@@ -201,23 +199,21 @@ function App() {
               <span className="text-[14px] font-bold text-foreground">PanWatch</span>
               {version && <span className="text-[10px] text-muted-foreground/60 font-normal">v{version}</span>}
             </NavLink>
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
-                <button
-                  onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
-                  className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                  title="GitHub 项目"
-                >
-                  <Github className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setLogsOpen(true)}
-                  className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
-                  title="查看日志"
-                >
-                  <ScrollText className="w-4 h-4" />
-                </button>
-              </div>
+            <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-2xl bg-accent/20 border border-border/40">
+              <button
+                onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
+                className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
+                title="GitHub 项目"
+              >
+                <Github className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setLogsOpen(true)}
+                className="w-8 h-8 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/70 transition-all"
+                title="查看日志"
+              >
+                <ScrollText className="w-4 h-4" />
+              </button>
               <AccountMenu
                 size="sm"
                 navItems={mobileMoreNavItems}
