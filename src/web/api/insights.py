@@ -14,6 +14,7 @@ from src.web.api.chat import (
     _fetch_technical_context,
     _get_ai_client,
 )
+from src.collectors.market_http import TTLCache
 from src.web.database import get_db
 from src.web.models import Stock
 import asyncio
@@ -21,6 +22,9 @@ import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+# 公告解读缓存(公告不变,长 TTL)
+_ANN_CACHE = TTLCache(default_ttl_sec=21600)  # 6h
 
 router = APIRouter()
 
@@ -266,3 +270,94 @@ async def add_position_eval(req: AddPositionEvalRequest, db: Session = Depends(g
         "verdict": _parse_verdict(content),
         "content": content,
     }
+
+
+# ── 公告/财报 利好利空解读(Phase B)──────────────────────────────────────
+_ANN_TONES = ("利好", "利空", "中性")
+
+
+def _parse_tone(text: str) -> str:
+    head = (text or "")[:60]
+    for t in _ANN_TONES:
+        if t in head:
+            return t
+    return "中性"
+
+
+async def _fetch_recent_announcements(symbol: str, name: str, limit: int = 5) -> list[dict]:
+    """取近 7 天公告/新闻(优先东财公告),失败返回 []。"""
+    try:
+        from src.collectors.news_collector import NewsCollector
+
+        items = await NewsCollector.from_database().fetch_all(
+            symbols=[symbol], since_hours=168, symbol_names={symbol: name}
+        )
+        anns = [it for it in items if it.source == "eastmoney"] or items
+        anns = sorted(anns, key=lambda x: x.publish_time, reverse=True)[:limit]
+        return [
+            {
+                "title": a.title,
+                "time": a.publish_time.strftime("%Y-%m-%d %H:%M"),
+                "content": (a.content or "")[:200],
+            }
+            for a in anns
+        ]
+    except Exception as e:
+        logger.debug(f"公告获取失败 {symbol}: {e}")
+        return []
+
+
+class AnnouncementEvalRequest(BaseModel):
+    symbol: str
+    market: str = "CN"
+    model_id: int | None = None
+
+
+@router.post("/announcement-eval")
+async def announcement_eval(req: AnnouncementEvalRequest, db: Session = Depends(get_db)):
+    """近期公告 → AI 逐条判利好/利空/中性 + 一句话。降级:无全文则用标题。"""
+    market = _parse_market(req.market).value
+    cache_key = f"{market}:{req.symbol}"
+    cached = _ANN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    stock = db.query(Stock).filter(Stock.symbol == req.symbol).first()
+    name = stock.name if stock else req.symbol
+    anns = await _fetch_recent_announcements(req.symbol, name)
+    if not anns:
+        result = {"symbol": req.symbol, "market": market, "items": []}
+        _ANN_CACHE.set(cache_key, result, ttl_sec=600)  # 无数据短缓存
+        return result
+
+    top = anns[:3]
+    listing = "\n".join(
+        f"{i + 1}. {a['title']}（{a['time']}）" + (f" — {a['content']}" if a["content"] else "")
+        for i, a in enumerate(top)
+    )
+    system_prompt = (
+        "你是 A股公告解读助手。对每条公告判断对股价的影响倾向(利好/利空/中性)并给一句话理由,"
+        "只依据给定信息、不臆造。严格逐条一行,格式: 序号|利好或利空或中性|一句话"
+    )
+    user_content = f"标的 {name}({market}:{req.symbol}) 近期公告:\n{listing}"
+    try:
+        content = await _get_ai_client(db, req.model_id).chat(
+            system_prompt, user_content, temperature=0.2
+        )
+    except Exception as e:
+        raise HTTPException(502, f"AI 公告解读失败: {e}")
+
+    tone_map: dict[int, tuple[str, str]] = {}
+    for line in (content or "").splitlines():
+        parts = line.split("|")
+        idx_raw = parts[0].strip().rstrip(".、) ") if parts else ""
+        if len(parts) >= 3 and idx_raw.isdigit():
+            tone_map[int(idx_raw) - 1] = (_parse_tone(parts[1]), parts[2].strip())
+
+    items = []
+    for i, a in enumerate(top):
+        tone, note = tone_map.get(i, ("中性", ""))
+        items.append({"title": a["title"], "time": a["time"], "tone": tone, "summary": note})
+    result = {"symbol": req.symbol, "market": market, "items": items}
+    _ANN_CACHE.set(cache_key, result)
+    return result

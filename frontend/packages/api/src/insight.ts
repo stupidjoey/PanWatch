@@ -59,6 +59,26 @@ export const insightApi = {
       body: JSON.stringify(params),
       timeoutMs: 60000, // AI 评估较慢,放宽超时
     }),
+
+  announcementEval: (params: { symbol: string; market: string; model_id?: number }) =>
+    fetchAPI<AnnouncementEvalResult>('/insights/announcement-eval', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      timeoutMs: 40000,
+    }),
+}
+
+export interface AnnouncementToneItem {
+  title: string
+  time: string
+  tone: string // 利好 / 利空 / 中性
+  summary: string
+}
+
+export interface AnnouncementEvalResult {
+  symbol: string
+  market: string
+  items: AnnouncementToneItem[]
 }
 
 export interface AddPositionEvalParams {
