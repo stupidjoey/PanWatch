@@ -42,6 +42,25 @@ _KLINE_CACHE: dict[str, tuple[float, int, list["KlineData"]]] = {}
 _KLINE_TTL_TRADING_S = 180
 _KLINE_TTL_CLOSED_S = 1800
 
+# 失败负缓存:源短暂故障(Server disconnected/限流)时,冷却窗口内不再联网。
+# 复活的批量消费者(entry_candidates/strategy_engine/backtest/组合归因)会并发地
+# 对同一批标的取数,空结果若不缓存则每个消费者每轮都重复打爆数据源。
+_FAIL_UNTIL: dict[str, float] = {}
+_FAIL_COOLDOWN_S = 60.0
+# 同标的并发合并:同一 cache_key 的并发取数串行化,只联网一次,其余复用缓存。
+_FETCH_LOCKS: dict[str, threading.Lock] = {}
+_FETCH_LOCKS_GUARD = threading.Lock()
+
+
+def _get_fetch_lock(cache_key: str) -> threading.Lock:
+    """返回某 cache_key 的取数锁(进程内复用),用于合并同标的并发请求。"""
+    with _FETCH_LOCKS_GUARD:
+        lk = _FETCH_LOCKS.get(cache_key)
+        if lk is None:
+            lk = threading.Lock()
+            _FETCH_LOCKS[cache_key] = lk
+        return lk
+
 
 def _kline_cache_ttl(market: MarketCode) -> float:
     try:
@@ -54,8 +73,9 @@ def _kline_cache_ttl(market: MarketCode) -> float:
 
 
 def clear_kline_cache() -> None:
-    """清空 K线内存缓存(测试隔离用)。"""
+    """清空 K线内存缓存与失败冷却标记(测试隔离用)。"""
     _KLINE_CACHE.clear()
+    _FAIL_UNTIL.clear()
 
 
 def _fetch_stooq_us_klines(symbol: str) -> list[KlineData]:
@@ -626,19 +646,56 @@ class KlineCollector:
         self.market = market
 
     def get_klines(self, symbol: str, days: int = 60) -> list[KlineData]:
-        """获取日K线数据(按市场状态缓存,避免调度任务每轮重复联网触发限流)。"""
+        """获取日K线数据。
+
+        正缓存(按市场状态 TTL)+ 同标的并发合并(只联网一次)+ 失败负缓存
+        (源短暂故障时冷却窗口内不再联网),避免多消费者并发把数据源打爆。
+        """
         cache_key = f"{self.market.value}:{symbol}"
         need = max(1, int(days or 1))
-        now = time.time()
+
+        # 1) 快路径:命中新鲜正缓存,无需加锁
+        hit = self._cache_hit(cache_key, need)
+        if hit is not None:
+            return hit
+
+        # 2) 同标的并发合并:仅一个线程实际联网,其余等待后复用结果
+        with _get_fetch_lock(cache_key):
+            hit = self._cache_hit(cache_key, need)
+            if hit is not None:
+                return hit
+
+            now = time.time()
+            # 3) 负缓存:刚失败过的标的,冷却窗口内返回陈旧/空,不再联网
+            if now < _FAIL_UNTIL.get(cache_key, 0.0):
+                stale = _KLINE_CACHE.get(cache_key)
+                bars = stale[2] if stale else []
+                return bars[-need:] if len(bars) > need else bars
+
+            klines = self._fetch_all_sources(symbol, days)
+            if klines:
+                # 成功:固化正缓存并清除冷却标记
+                _KLINE_CACHE[cache_key] = (now, len(klines), list(klines))
+                _FAIL_UNTIL.pop(cache_key, None)
+            else:
+                # 失败:固化短冷却,挡住并发其余消费者与下一轮重复联网
+                _FAIL_UNTIL[cache_key] = now + _FAIL_COOLDOWN_S
+            return klines[-need:] if len(klines) > need else klines
+
+    def _cache_hit(self, cache_key: str, need: int) -> list[KlineData] | None:
+        """命中新鲜正缓存(TTL 内且条数足够)则返回切片,否则 None。"""
         cached = _KLINE_CACHE.get(cache_key)
         if (
             cached
-            and (now - cached[0]) < _kline_cache_ttl(self.market)
+            and (time.time() - cached[0]) < _kline_cache_ttl(self.market)
             and cached[1] >= need
         ):
             bars = cached[2]
             return bars[-need:] if len(bars) > need else bars
+        return None
 
+    def _fetch_all_sources(self, symbol: str, days: int) -> list[KlineData]:
+        """tencent → stooq(US) / eastmoney(CN/HK) 链路取数(不含缓存/合并逻辑)。"""
         klines = _fetch_tencent_klines(symbol, self.market, days)
 
         # Tencent 对部分美股返回的 day 数据异常偏少（仅 1-2 条），使用 Stooq 回退。
@@ -656,10 +713,7 @@ class KlineCollector:
                 if len(em) > len(klines):
                     klines = em
 
-        # 只缓存非空结果:数据源短暂故障时不把"空"固化,下轮可重试。
-        if klines:
-            _KLINE_CACHE[cache_key] = (now, len(klines), list(klines))
-        return klines[-need:] if len(klines) > need else klines
+        return klines
 
     def get_technical_indicators(
         self, symbol: str = "", klines: list[KlineData] | None = None

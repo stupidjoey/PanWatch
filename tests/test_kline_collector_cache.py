@@ -69,8 +69,9 @@ def test_cache_serves_shorter_request_from_longer_entry(monkeypatch):
     assert len(out) == 30
 
 
-def test_empty_result_not_cached(monkeypatch):
-    """取数为空时不应写缓存,下一轮仍会重试(别把瞬时故障固化为空)。"""
+def test_empty_result_negative_cached_then_retries(monkeypatch):
+    """取数为空时进入短冷却:冷却窗口内不再联网(挡住并发/相邻消费者重复打爆源);
+    冷却过后仍会重试,不把瞬时故障永久固化为空。"""
     calls = {"n": 0}
 
     def fake_fetch(symbol, market, days):
@@ -83,7 +84,12 @@ def test_empty_result_not_cached(monkeypatch):
     c = kline_collector.KlineCollector(MarketCode.CN)
     assert c.get_klines("600519", days=120) == []
     assert c.get_klines("600519", days=120) == []
-    assert calls["n"] == 2, "空结果不应缓存,两次都应联网重试"
+    assert calls["n"] == 1, "冷却窗口内不应重复联网(防突发打爆数据源)"
+
+    # 模拟冷却到期:应重新联网重试,证明瞬时故障未被永久固化为空
+    kline_collector._FAIL_UNTIL.clear()
+    assert c.get_klines("600519", days=120) == []
+    assert calls["n"] == 2, "冷却过后应重新联网重试"
 
 
 def test_get_kline_summary_fetches_klines_once(monkeypatch):
