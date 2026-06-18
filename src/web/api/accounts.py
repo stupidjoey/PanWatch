@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from src.web.database import get_db
 from src.web.models import Account, PriceAlertRule, Position, Stock
 from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
+from src.collectors.market_http import TTLCache
 from src.models.market import MarketCode
 
 logger = logging.getLogger(__name__)
@@ -601,6 +602,25 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
     return quotes
 
 
+# 组合基准/归因结果缓存:重建全持仓 NAV 很贵(逐只拉 K 线),按持仓指纹缓存结果。
+# 持仓变动即失效(指纹变);失败/空结果不缓存,避免把瞬时故障冻住 10 分钟。
+_PORTFOLIO_RESULT_CACHE = TTLCache(default_ttl_sec=600.0)
+
+
+def _holdings_signature(db: Session) -> str:
+    """启用账户持仓的稳定指纹(stock_id + 合并后数量);仅查 DB,不拉行情/K 线。"""
+    rows = (
+        db.query(Position.stock_id, Position.quantity)
+        .join(Account, Account.id == Position.account_id)
+        .filter(Account.enabled == True)  # noqa: E712
+        .all()
+    )
+    agg: dict[int, float] = {}
+    for sid, qty in rows:
+        agg[sid] = agg.get(sid, 0.0) + (qty or 0)
+    return ";".join(f"{sid}:{agg[sid]:g}" for sid in sorted(agg))
+
+
 def _gather_holdings(db: Session) -> list[dict]:
     """汇总所有启用账户的真实持仓为统一列表(CNY 市值/浮盈 + fx),多账户同股合并。"""
     accounts = db.query(Account).filter(Account.enabled == True).all()  # noqa: E712
@@ -663,15 +683,24 @@ def portfolio_benchmark(
         build_portfolio_benchmark,
     )
 
+    days = max(20, min(int(days), 250))
+    bcode = benchmark or DEFAULT_BENCHMARK
+    sig = _holdings_signature(db)
+    if not sig:
+        return {"empty": True, "reason": "no_holdings"}
+    ckey = f"bench:{days}:{bcode}:{sig}"
+    cached = _PORTFOLIO_RESULT_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
     holdings = _gather_holdings(db)
     if not holdings:
         return {"empty": True, "reason": "no_holdings"}
-    days = max(20, min(int(days), 250))
-    res = build_portfolio_benchmark(
-        holdings, days=days, benchmark_code=(benchmark or DEFAULT_BENCHMARK)
-    )
+    res = build_portfolio_benchmark(holdings, days=days, benchmark_code=bcode)
     if not res:
+        # 失败/数据不足不缓存,下轮可重试(由 K 线负缓存兜住打爆)
         return {"empty": True, "reason": "insufficient_data"}
+    _PORTFOLIO_RESULT_CACHE.set(ckey, res)
     return res
 
 
@@ -731,11 +760,24 @@ def portfolio_attribution(days: int = 60, benchmark: str = "000300", db: Session
     """近 days 日各持仓对组合收益的贡献(谁拖累/贡献),降序。"""
     from src.core.portfolio_benchmark import DEFAULT_BENCHMARK, build_attribution
 
+    days = max(20, min(int(days), 250))
+    bcode = benchmark or DEFAULT_BENCHMARK
+    sig = _holdings_signature(db)
+    if not sig:
+        return {"items": []}
+    ckey = f"attr:{days}:{bcode}:{sig}"
+    cached = _PORTFOLIO_RESULT_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
     holdings = _gather_holdings(db)
     if not holdings:
         return {"items": []}
-    days = max(20, min(int(days), 250))
-    return {"items": build_attribution(holdings, days=days, benchmark_code=(benchmark or DEFAULT_BENCHMARK))}
+    items = build_attribution(holdings, days=days, benchmark_code=bcode)
+    result = {"items": items}
+    if items:  # 空结果不缓存,下轮可重试
+        _PORTFOLIO_RESULT_CACHE.set(ckey, result)
+    return result
 
 
 @router.post("/portfolio/ai-review")
