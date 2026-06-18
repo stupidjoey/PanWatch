@@ -69,3 +69,15 @@ def test_load_ohlcv_falls_back_when_no_klines(monkeypatch):
     monkeypatch.setattr(ta, "_real_load_ohlcv", lambda symbol, curr_date, *a, **k: sentinel)
     out = ta._panwatch_load_ohlcv("601238", "2026-06-18")
     assert out is sentinel
+
+
+def test_route_to_vendor_degrades_on_upstream_error(monkeypatch):
+    """上游 vendor 失败(如 FRED 无 key、polymarket SSL)应降级返回空,不抛错中断整轮分析。"""
+
+    def boom(method_name, *a, **k):
+        raise RuntimeError("FRED_API_KEY environment variable is not set")
+
+    monkeypatch.setattr(ta, "_real_route_to_vendor", boom)
+    # get_macro_indicators:首参是指标名(非 A股/港股) → 走上游 passthrough → boom → 降级空
+    out = ta._patched_route_to_vendor("get_macro_indicators", "fed_funds_rate", "2026-06-18", 30)
+    assert out == ""

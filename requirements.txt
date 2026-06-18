@@ -20,4 +20,8 @@ PyJWT>=2.8.0
 # 不在 PyPI,用 git+ URL 安装。会拉 langchain/langgraph/yfinance 等较重依赖
 # (~115 个包,首次安装 2-5 分钟)。
 # 用户启用「TradingAgents 深度分析」Agent 时才会真正调用它;不启用零开销。
-tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@main
+# 锁定到 v0.2.5(而非 @main):上游 main 不断加需外部 key/服务的新工具
+# (get_verified_market_snapshot→yfinance、get_macro_indicators→FRED、polymarket 等),
+# 我们的注入层未覆盖就会硬失败。v0.2.5 是 PanWatch 适配/测试的稳定版,不含这些工具。
+# 升级前需先在适配层(toolkit_adapter)对新工具做覆盖/降级。
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.2.5

@@ -287,8 +287,18 @@ def _patched_route_to_vendor(method_name: str, *args, **kwargs):
             _emit_toolkit_log("warning", "ERROR", method_name, symbol, error=str(e)[:200])
             return f"[关键词新闻搜索失败「{symbol}」: {e}]"
 
-    # 美股 / 其他:直接走上游 vendor
-    upstream_result = _real_route_to_vendor(method_name, *args, **kwargs)
+    # 美股 / 其他:直接走上游 vendor。
+    # 降级兜底:上游某些工具依赖外部 key/服务(FRED 无 key、polymarket SSL、未配置 vendor 等),
+    # 失败会抛异常拖垮整个深度分析。这里捕获并返回空 —— 单个工具缺数据 ≠ 整轮失败。
+    try:
+        upstream_result = _real_route_to_vendor(method_name, *args, **kwargs)
+    except Exception as e:
+        logger.warning(f"[TA toolkit] 上游 {method_name} 失败,降级返回空(不中断分析): {e}")
+        _emit_toolkit_log(
+            "warning", "DEGRADE", method_name, symbol or "(none)",
+            error=str(e)[:200], extra_args=_args_summary(args),
+        )
+        return ""
     upstream_str = str(upstream_result) if upstream_result is not None else ""
     action_label = "PASSTHROUGH" if not is_a_share(symbol) else "FALLTHROUGH"
     _emit_toolkit_log(
