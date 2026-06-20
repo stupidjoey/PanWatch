@@ -104,23 +104,21 @@ class ContextMaintenanceScheduler:
                 rebalance.get("skipped_low_sample", 0),
             )
 
-            # Phase 4: 因子 IC/IR 评估纳入定时闭环(只评估+记录,供调权与机会页参考)
+            # Phase 4 → 因子自校准闭环:把 IC/IR 接进每因子权重的轻量标定
+            # (calibrate_all_markets 内部按市场算 IC 并据此调权,不再只是记录)。
             try:
-                from src.core.factor_eval import evaluate_factor_ic
+                from src.core.factor_calibration import calibrate_all_markets
 
-                ic = await asyncio.to_thread(evaluate_factor_ic, days=90, horizon=5)
-                ics = {
-                    k: v.get("ic")
-                    for k, v in ic.get("factors", {}).items()
-                    if v.get("ic") is not None
-                }
+                fcal = await asyncio.to_thread(calibrate_all_markets)
+                changed = sum(r.get("changed", 0) for r in fcal.values())
                 logger.log(
-                    logging.INFO if ics else logging.DEBUG,
-                    "[上下文维护] 因子IC评估完成: %s",
-                    ics,
+                    logging.INFO if changed else logging.DEBUG,
+                    "[上下文维护] 因子自校准完成: changed=%s detail=%s",
+                    changed,
+                    {m: r.get("changed", 0) for m, r in fcal.items()},
                 )
-            except Exception as ic_err:
-                logger.debug("[上下文维护] 因子IC评估跳过: %s", ic_err)
+            except Exception as fc_err:
+                logger.debug("[上下文维护] 因子自校准跳过: %s", fc_err)
         except Exception as e:
             logger.exception(f"[上下文维护] 后验评估异常: {e}")
         finally:
@@ -175,11 +173,16 @@ class ContextMaintenanceScheduler:
             strategy_eval_task,
             strategy_rebalance_task,
         )
+        # 因子自校准:须在 outcome 评估之后(IC 才新鲜),不能并进上面的 gather。
+        from src.core.factor_calibration import calibrate_all_markets
+
+        factor_calibration_stats = await asyncio.to_thread(calibrate_all_markets)
         return {
             "agent_predictions": agent_stats,
             "entry_candidates": candidate_stats,
             "strategy_outcomes": strategy_eval_stats,
             "strategy_rebalance": strategy_rebalance_stats,
+            "factor_calibration": factor_calibration_stats,
         }
 
     async def _refresh_opportunities_job(self):
