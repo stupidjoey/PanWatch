@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -5,6 +8,7 @@ from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.models.market import MarketCode
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class QuoteItem(BaseModel):
@@ -102,6 +106,19 @@ async def get_quotes_batch(payload: QuoteBatchRequest):
             quotes_by_market[market_code] = {item.get("symbol"): item for item in resp.data}
         else:
             quotes_by_market[market_code] = {}
+
+        # 场外基金腾讯不支持，走天天基金兜底
+        if market_code == MarketCode.CN:
+            cn_quotes = quotes_by_market.get(MarketCode.CN, {})
+            missing = [s for s in symbols if s not in cn_quotes]
+            if missing:
+                try:
+                    from src.collectors.akshare_collector import _fetch_eastmoney_fund_quotes
+                    fund_items = await asyncio.to_thread(_fetch_eastmoney_fund_quotes, missing)
+                    for item in fund_items:
+                        cn_quotes[item["symbol"]] = item
+                except Exception as e:
+                    logger.warning(f"天天基金净值获取失败: {e}")
 
     results = []
     for item in payload.items:
