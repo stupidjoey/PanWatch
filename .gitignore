@@ -27,7 +27,3 @@ pnpm-debug.log*
 
 # 本地设计/计划文档,不入库
 docs/superpowers/
-# 个人配置（勿提交）
-config/watchlist.yaml
-scripts/batch_import_watchlist.py
-scripts/_tmp_quote_check.py
