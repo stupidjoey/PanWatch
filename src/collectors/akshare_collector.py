@@ -14,12 +14,8 @@ logger = logging.getLogger(__name__)
 # 腾讯股票行情 API（HTTP，GBK 编码）
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
 
-# 东财基金行情 API（场外开放式基金，腾讯不支持）
-EASTMONEY_FUND_QUOTE_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
-EASTMONEY_FUND_QUOTE_PARAMS = {
-    "fltt": "2",
-    "fields": "f2,f3,f4,f12,f14,f15,f16,f17",
-}
+# 天天基金行情 API（场外开放式基金，腾讯/东财 push2 不支持）
+TIANTIAN_FUND_URL = "http://fundgz.1234567.com.cn/js/{code}.js"
 
 # 实时报价短 TTL 缓存 + 按 host 节流:平抑模拟盘/价格提醒每 60s 的批量并发突发。
 _QUOTE_HOST = "qt.gtimg.cn"
@@ -179,64 +175,68 @@ def _fetch_tencent_quotes(symbols: list[str]) -> list[dict]:
 
 
 def _fetch_eastmoney_fund_quotes(symbols: list[str]) -> list[dict]:
-    """批量获取场外开放式基金净值（东财 API，腾讯不支持场外基金）。"""
+    """批量获取场外开放式基金净值（天天基金 API，腾讯和东财 push2 不支持场外基金）。"""
     if not symbols:
         return []
-    from src.core.cn_symbol import is_cn_sh
-    secids = [f"{'1' if is_cn_sh(s) else '0'}.{s}" for s in symbols]
-    cache_key = "fund:" + ",".join(secids)
+    cache_key = "fund:" + ",".join(symbols)
     cached = _QUOTE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    params = {
-        **EASTMONEY_FUND_QUOTE_PARAMS,
-        "secids": ",".join(secids),
-    }
-    import json as _json
-    content = market_get(
-        EASTMONEY_FUND_QUOTE_URL,
-        host_key="push2.eastmoney.com",
-        min_interval_s=0.5,
-        timeout=10,
-        retries=2,
-        parse="text",
-        log_label="东财基金净值",
-        params=params,
-    )
-    if not content:
-        return []
+    import re, concurrent.futures
+    import httpx as _httpx
 
-    try:
-        data = _json.loads(content)
-    except Exception:
-        logger.warning("东财基金行情 JSON 解析失败")
-        return []
+    def _fetch_one(code: str) -> dict | None:
+        try:
+            url = TIANTIAN_FUND_URL.format(code=code)
+            with _httpx.Client(timeout=5, follow_redirects=True) as client:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    return None
+                text = resp.text
+            # Parse jsonpgz({...}) format
+            m = re.search(r"jsonpgz\((.*)\)", text)
+            if not m:
+                return None
+            import json as _json
+            data = _json.loads(m.group(1))
+            gsz = float(data.get("gsz") or 0)
+            dwjz = float(data.get("dwjz") or 0)
+            if gsz <= 0:
+                gsz = dwjz
+            if gsz <= 0:
+                return None
+            gszzl = float(data.get("gszzl") or 0)
+            return {
+                "name": str(data.get("name") or ""),
+                "symbol": str(data.get("fundcode") or code),
+                "current_price": round(gsz, 4),
+                "prev_close": round(dwjz, 4),
+                "open_price": round(dwjz, 4),
+                "high_price": round(gsz, 4),
+                "low_price": round(gsz, 4),
+                "volume": 0,
+                "turnover": 0,
+                "change_amount": round(gsz - dwjz, 4),
+                "change_pct": round(gszzl, 2),
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "pe_ratio": None,
+                "circulating_market_value": None,
+                "total_market_value": None,
+            }
+        except Exception as e:
+            logger.debug(f"天天基金净值获取失败 {code}: {e}")
+            return None
 
-    items = (data.get("data") or {}).get("diff") or []
     results = []
-    for item in items:
-        price = float(item.get("f2") or 0)
-        if price <= 0:
-            continue
-        results.append({
-            "name": str(item.get("f14") or ""),
-            "symbol": str(item.get("f12") or ""),
-            "current_price": price,
-            "prev_close": float(item.get("f4") or 0),
-            "open_price": price,
-            "high_price": float(item.get("f15") or price),
-            "low_price": float(item.get("f16") or price),
-            "volume": 0,
-            "turnover": 0,
-            "change_amount": round(price - float(item.get("f4") or 0), 4),
-            "change_pct": float(item.get("f3") or 0),
-            "turnover_rate": None,
-            "volume_ratio": None,
-            "pe_ratio": None,
-            "circulating_market_value": None,
-            "total_market_value": None,
-        })
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_one, s): s for s in symbols}
+        for future in concurrent.futures.as_completed(futures):
+            item = future.result()
+            if item:
+                results.append(item)
+
     if results:
         _QUOTE_CACHE.set(cache_key, results)
     return results

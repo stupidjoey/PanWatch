@@ -12,3 +12,8 @@ markets:
     stocks:
       - symbol: "00700"
         name: "腾讯控股"
+
+  - code: US
+    stocks:
+      - symbol: "NVT"
+        name: "nVent Electric"
