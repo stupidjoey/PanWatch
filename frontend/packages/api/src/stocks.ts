@@ -12,6 +12,7 @@ export interface StockItem {
   symbol: string
   name: string
   market: string
+  asset_type: 'security' | 'fund' | 'unknown'
   sort_order?: number
   agents?: StockAgentInfo[]
 }
@@ -20,6 +21,7 @@ export interface StockCreatePayload {
   symbol: string
   name: string
   market: string
+  asset_type?: 'security' | 'fund' | 'unknown'
 }
 
 export interface StockAgentUpdatePayload {

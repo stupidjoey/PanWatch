@@ -7,11 +7,19 @@ import concurrent.futures
 
 import httpx
 
+from src.core.asset_types import (
+    ASSET_TYPE_FUND,
+    ASSET_TYPE_SECURITY,
+    ASSET_TYPE_UNKNOWN,
+    normalize_asset_type,
+)
+
 logger = logging.getLogger(__name__)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
 CACHE_FILE = os.path.join(DATA_DIR, "stock_list_cache.json")
 CACHE_TTL = 86400 * 7  # 7 days
+CACHE_SCHEMA_VERSION = 2
 
 # 东方财富 A 股（使用 push2delay 域名，避免重定向）
 EASTMONEY_URL = "http://80.push2delay.eastmoney.com/api/qt/clist/get"
@@ -77,7 +85,10 @@ def _load_cache() -> list[dict] | None:
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if time.time() - data.get("ts", 0) < CACHE_TTL:
+        if (
+            data.get("version") == CACHE_SCHEMA_VERSION
+            and time.time() - data.get("ts", 0) < CACHE_TTL
+        ):
             return data["stocks"]
     except (json.JSONDecodeError, KeyError):
         pass
@@ -87,7 +98,37 @@ def _load_cache() -> list[dict] | None:
 def _save_cache(stocks: list[dict]):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"ts": time.time(), "stocks": stocks}, f, ensure_ascii=False)
+        json.dump(
+            {
+                "version": CACHE_SCHEMA_VERSION,
+                "ts": time.time(),
+                "stocks": stocks,
+            },
+            f,
+            ensure_ascii=False,
+        )
+
+
+def _catalog_item(
+    item: dict,
+    market: str,
+    asset_type: str = ASSET_TYPE_SECURITY,
+) -> dict:
+    return {
+        "symbol": str(item["f12"]),
+        "name": str(item["f14"]),
+        "market": market,
+        "asset_type": asset_type,
+    }
+
+
+def asset_type_from_search_classify(classify: str | None) -> str:
+    """Map Eastmoney search classification to the local valuation model."""
+    return (
+        ASSET_TYPE_FUND
+        if str(classify or "").strip().upper() == "OTCFUND"
+        else ASSET_TYPE_SECURITY
+    )
 
 
 HEADERS = {
@@ -104,7 +145,7 @@ def _fetch_page(client: httpx.Client, page: int) -> list[dict]:
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in items]
+    return [_catalog_item(item, "CN") for item in items]
 
 
 def _fetch_from_eastmoney() -> list[dict]:
@@ -118,7 +159,7 @@ def _fetch_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        stocks = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in first_items]
+        stocks = [_catalog_item(item, "CN") for item in first_items]
 
         if total <= PAGE_SIZE:
             return stocks
@@ -143,7 +184,7 @@ def _fetch_hk_page(client: httpx.Client, page: int) -> list[dict]:
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "HK"} for item in items]
+    return [_catalog_item(item, "HK") for item in items]
 
 
 def _fetch_hk_from_eastmoney() -> list[dict]:
@@ -156,7 +197,7 @@ def _fetch_hk_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        stocks = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "HK"} for item in first_items]
+        stocks = [_catalog_item(item, "HK") for item in first_items]
 
         if total <= PAGE_SIZE:
             return stocks
@@ -180,7 +221,7 @@ def _fetch_bj_page(client: httpx.Client, page: int) -> list[dict]:
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in items]
+    return [_catalog_item(item, "CN") for item in items]
 
 
 def _fetch_bj_from_eastmoney() -> list[dict]:
@@ -194,7 +235,7 @@ def _fetch_bj_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        stocks = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in first_items]
+        stocks = [_catalog_item(item, "CN") for item in first_items]
 
         if total <= PAGE_SIZE:
             return stocks
@@ -219,7 +260,7 @@ def _fetch_fund_page(client: httpx.Client, page: int) -> list[dict]:
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in items]
+    return [_catalog_item(item, "CN", ASSET_TYPE_FUND) for item in items]
 
 
 def _fetch_fund_from_eastmoney() -> list[dict]:
@@ -232,7 +273,7 @@ def _fetch_fund_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        funds = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in first_items]
+        funds = [_catalog_item(item, "CN", ASSET_TYPE_FUND) for item in first_items]
 
         if total <= PAGE_SIZE:
             return funds
@@ -256,7 +297,7 @@ def _fetch_us_page(client: httpx.Client, page: int) -> list[dict]:
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "US"} for item in items]
+    return [_catalog_item(item, "US") for item in items]
 
 
 def _fetch_us_from_eastmoney() -> list[dict]:
@@ -269,7 +310,7 @@ def _fetch_us_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        stocks = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "US"} for item in first_items]
+        stocks = [_catalog_item(item, "US") for item in first_items]
 
         if total <= PAGE_SIZE:
             return stocks
@@ -297,6 +338,7 @@ def _fetch_from_akshare() -> list[dict]:
             "symbol": str(row["code"]),
             "name": str(row["name"]),
             "market": "CN",
+            "asset_type": ASSET_TYPE_SECURITY,
         })
     return stocks
 
@@ -409,7 +451,7 @@ def _realtime_search(query: str, market: str = "", limit: int = 20) -> list[dict
 
         # 判断市场
         if (
-            classify in ("AStock", "BJStock", "Fund")
+            classify in ("AStock", "BJStock", "Fund", "OTCFUND")
             or any(ch in security_type for ch in ("沪", "深", "北", "基金"))
             or code_raw.endswith(".BJ")
             or code_raw.startswith("BJ")
@@ -438,6 +480,7 @@ def _realtime_search(query: str, market: str = "", limit: int = 20) -> list[dict
             "symbol": symbol,
             "name": item.get("Name", ""),
             "market": stock_market,
+            "asset_type": asset_type_from_search_classify(classify),
         })
 
         if len(results) >= limit:
@@ -464,9 +507,12 @@ def search_stocks(query: str, market: str = "", limit: int = 20) -> list[dict]:
             logger.info("实时搜索无结果，使用缓存搜索")
         return cached
 
-    seen = {(r.get("market"), r.get("symbol")) for r in results}
+    seen = {
+        (r.get("market"), r.get("symbol"), r.get("asset_type"))
+        for r in results
+    }
     for r in cached:
-        key = (r.get("market"), r.get("symbol"))
+        key = (r.get("market"), r.get("symbol"), r.get("asset_type"))
         if key in seen:
             continue
         results.append(r)
@@ -505,3 +551,86 @@ def _cached_search(query: str, market: str = "", limit: int = 20) -> list[dict]:
 
     results.sort(key=lambda x: x[0])
     return [r[1] for r in results[:limit]]
+
+
+def _normalize_asset_name(value: str | None) -> str:
+    text = str(value or "").strip().upper()
+    for ch in (" ", "\t", "\n", "(", ")", "（", "）", "-", "_"):
+        text = text.replace(ch, "")
+    return text
+
+
+def infer_asset_type_from_catalog(
+    symbol: str,
+    name: str,
+    market: str,
+    catalog: list[dict],
+) -> str:
+    """Best-effort classification for rows created before asset_type existed.
+
+    Duplicate LOF codes can have both an exchange-traded and an OTC entry. In
+    that case an exact normalized name is required; ambiguous rows stay
+    ``unknown`` so the stock K-line pipeline is not called accidentally.
+    """
+    candidates = [
+        item
+        for item in catalog
+        if str(item.get("symbol") or "") == str(symbol)
+        and str(item.get("market") or "") == str(market)
+    ]
+    if not candidates:
+        return ASSET_TYPE_UNKNOWN
+
+    normalized_name = _normalize_asset_name(name)
+    exact_types = {
+        normalize_asset_type(item.get("asset_type"), default=ASSET_TYPE_UNKNOWN)
+        for item in candidates
+        if _normalize_asset_name(item.get("name")) == normalized_name
+    }
+    exact_types.discard(ASSET_TYPE_UNKNOWN)
+    if len(exact_types) == 1:
+        return exact_types.pop()
+
+    candidate_types = {
+        normalize_asset_type(item.get("asset_type"), default=ASSET_TYPE_UNKNOWN)
+        for item in candidates
+    }
+    candidate_types.discard(ASSET_TYPE_UNKNOWN)
+    if len(candidate_types) == 1:
+        return candidate_types.pop()
+    return ASSET_TYPE_UNKNOWN
+
+
+def sync_stock_asset_types(catalog: list[dict]) -> int:
+    """Backfill legacy ``unknown`` stock rows from the refreshed catalog."""
+    if not catalog:
+        return 0
+
+    from src.web.database import SessionLocal
+    from src.web.models import Stock
+
+    db = SessionLocal()
+    updated = 0
+    try:
+        rows = db.query(Stock).filter(Stock.asset_type == ASSET_TYPE_UNKNOWN).all()
+        for row in rows:
+            inferred = infer_asset_type_from_catalog(
+                row.symbol,
+                row.name,
+                row.market,
+                catalog,
+            )
+            if inferred == ASSET_TYPE_UNKNOWN:
+                continue
+            row.asset_type = inferred
+            updated += 1
+        if updated:
+            db.commit()
+            logger.info("已回填 %s 个历史标的的资产类型", updated)
+        return updated
+    except Exception:
+        db.rollback()
+        logger.exception("历史标的资产类型回填失败")
+        return 0
+    finally:
+        db.close()

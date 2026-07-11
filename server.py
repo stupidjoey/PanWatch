@@ -1250,13 +1250,18 @@ async def lifespan(app):
 
     # 后台刷新股票列表缓存
     import threading
-    from src.web.stock_list import get_stock_list, refresh_stock_list
+    from src.web.stock_list import (
+        get_stock_list,
+        refresh_stock_list,
+        sync_stock_asset_types,
+    )
 
     def refresh_stock_cache():
         stocks = get_stock_list()
         if not stocks or len([s for s in stocks if s["market"] == "CN"]) == 0:
             logger.info("股票列表缓存为空或缺少 A 股，后台刷新中...")
-            refresh_stock_list()
+            stocks = refresh_stock_list()
+        sync_stock_asset_types(stocks)
 
     threading.Thread(target=refresh_stock_cache, daemon=True).start()
 
@@ -1319,16 +1324,9 @@ app.router.lifespan_context = lifespan
 # 生产环境静态文件服务
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
-    from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import FileResponse
+    from src.web.spa import register_spa_routes
 
-    # SPA 路由：所有非 API 请求返回 index.html
-    @app.get("/{path:path}")
-    async def serve_spa(path: str):
-        file_path = os.path.join(static_dir, path)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+    register_spa_routes(app, static_dir)
 
     logger.info(f"静态文件服务已启用: {static_dir}")
 

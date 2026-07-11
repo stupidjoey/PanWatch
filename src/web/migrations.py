@@ -1585,6 +1585,30 @@ def _m118_paper_trading_market_allocations(conn: Connection) -> None:
         )
 
 
+def _m119_stock_asset_type(conn: Connection) -> None:
+    """Persist whether a watched asset uses market prices or OTC fund NAV."""
+    _add_column_if_missing(
+        conn,
+        "stocks",
+        "asset_type",
+        "ALTER TABLE stocks ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'unknown'",
+    )
+    if not _has_table(conn, "stocks"):
+        return
+
+    # 海外市场当前只接入了交易所行情，可直接安全回填。
+    conn.execute(
+        text(
+            """
+UPDATE stocks
+SET asset_type = 'security'
+WHERE market IN ('HK', 'US')
+  AND (asset_type IS NULL OR TRIM(asset_type) = '' OR asset_type = 'unknown')
+"""
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -1604,6 +1628,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(116, "chat_tables", _m116_chat_tables),
     Migration(117, "chat_initial_context", _m117_chat_initial_context),
     Migration(118, "paper_trading_market_allocations", _m118_paper_trading_market_allocations),
+    Migration(119, "stock_asset_type", _m119_stock_asset_type),
 )
 
 

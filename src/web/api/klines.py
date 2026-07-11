@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from datetime import datetime
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from src.collectors.kline_collector import KlineCollector
+from src.core.asset_types import ASSET_TYPE_SECURITY, normalize_asset_type, supports_kline
 from src.models.market import MarketCode
+from src.web.database import get_db
+from src.web.models import Stock
 
 router = APIRouter()
 
@@ -48,6 +52,17 @@ def _serialize_klines(klines) -> list[dict]:
         }
         for k in klines
     ]
+
+
+def _asset_type_for_symbol(db: Session, symbol: str, market: str) -> str:
+    row = (
+        db.query(Stock.asset_type)
+        .filter(Stock.symbol == symbol, Stock.market == market)
+        .first()
+    )
+    if not row:
+        return ASSET_TYPE_SECURITY
+    return normalize_asset_type(row[0], default="unknown")
 
 
 def _aggregate_klines(klines, interval: str) -> list:
@@ -100,15 +115,33 @@ def _aggregate_klines(klines, interval: str) -> list:
 
 
 @router.get("/{symbol}")
-def get_klines(symbol: str, market: str = "CN", days: int = 60, interval: str = "1d"):
+def get_klines(
+    symbol: str,
+    market: str = "CN",
+    days: int = 60,
+    interval: str = "1d",
+    db: Session = Depends(get_db),
+):
     """获取单只股票K线数据"""
     market_code = _parse_market(market)
+    asset_type = _asset_type_for_symbol(db, symbol, market_code.value)
+    if not supports_kline(asset_type):
+        return {
+            "symbol": symbol,
+            "market": market_code.value,
+            "asset_type": asset_type,
+            "days": days,
+            "interval": interval,
+            "klines": [],
+            "unsupported_reason": "fund_nav_only",
+        }
     collector = KlineCollector(market_code)
     klines = collector.get_klines(symbol, days=days)
     klines = _aggregate_klines(klines, interval)
     return {
         "symbol": symbol,
         "market": market_code.value,
+        "asset_type": asset_type,
         "days": days,
         "interval": interval,
         "klines": _serialize_klines(klines),
@@ -116,7 +149,7 @@ def get_klines(symbol: str, market: str = "CN", days: int = 60, interval: str = 
 
 
 @router.post("/batch")
-def get_klines_batch(payload: KlineBatchRequest):
+def get_klines_batch(payload: KlineBatchRequest, db: Session = Depends(get_db)):
     """批量获取K线数据"""
     if not payload.items:
         return []
@@ -124,18 +157,26 @@ def get_klines_batch(payload: KlineBatchRequest):
     results = []
     for item in payload.items:
         market_code = _parse_market(item.market)
-        collector = KlineCollector(market_code)
+        asset_type = _asset_type_for_symbol(db, item.symbol, market_code.value)
         days = item.days or 60
         interval = item.interval or "1d"
-        klines = collector.get_klines(item.symbol, days=days)
-        klines = _aggregate_klines(klines, interval)
+        if supports_kline(asset_type):
+            collector = KlineCollector(market_code)
+            klines = collector.get_klines(item.symbol, days=days)
+            klines = _aggregate_klines(klines, interval)
+        else:
+            klines = []
         results.append(
             {
                 "symbol": item.symbol,
                 "market": market_code.value,
+                "asset_type": asset_type,
                 "days": days,
                 "interval": interval,
                 "klines": _serialize_klines(klines),
+                "unsupported_reason": (
+                    None if supports_kline(asset_type) else "fund_nav_only"
+                ),
             }
         )
 
@@ -143,20 +184,37 @@ def get_klines_batch(payload: KlineBatchRequest):
 
 
 @router.get("/{symbol}/summary")
-def get_kline_summary(symbol: str, market: str = "CN"):
+def get_kline_summary(
+    symbol: str,
+    market: str = "CN",
+    db: Session = Depends(get_db),
+):
     """获取单只股票K线摘要"""
     market_code = _parse_market(market)
+    asset_type = _asset_type_for_symbol(db, symbol, market_code.value)
+    if not supports_kline(asset_type):
+        return {
+            "symbol": symbol,
+            "market": market_code.value,
+            "asset_type": asset_type,
+            "summary": None,
+            "unsupported_reason": "fund_nav_only",
+        }
     collector = KlineCollector(market_code)
     summary = collector.get_kline_summary(symbol)
     return {
         "symbol": symbol,
         "market": market_code.value,
+        "asset_type": asset_type,
         "summary": summary,
     }
 
 
 @router.post("/summary/batch")
-def get_kline_summary_batch(payload: KlineSummaryBatchRequest):
+def get_kline_summary_batch(
+    payload: KlineSummaryBatchRequest,
+    db: Session = Depends(get_db),
+):
     """批量获取K线摘要"""
     if not payload.items:
         return []
@@ -164,13 +222,21 @@ def get_kline_summary_batch(payload: KlineSummaryBatchRequest):
     results = []
     for item in payload.items:
         market_code = _parse_market(item.market)
-        collector = KlineCollector(market_code)
-        summary = collector.get_kline_summary(item.symbol)
+        asset_type = _asset_type_for_symbol(db, item.symbol, market_code.value)
+        if supports_kline(asset_type):
+            collector = KlineCollector(market_code)
+            summary = collector.get_kline_summary(item.symbol)
+        else:
+            summary = None
         results.append(
             {
                 "symbol": item.symbol,
                 "market": market_code.value,
+                "asset_type": asset_type,
                 "summary": summary,
+                "unsupported_reason": (
+                    None if supports_kline(asset_type) else "fund_nav_only"
+                ),
             }
         )
 

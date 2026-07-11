@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3, Brain } from 'lucide-react'
+import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3, Brain, AlertTriangle } from 'lucide-react'
 import { fetchAPI, stocksApi, type AIService, type NotifyChannel } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
 import { SuggestionBadge, type SuggestionInfo, type KlineSummary } from '@panwatch/biz-ui/components/suggestion-badge'
@@ -35,11 +35,14 @@ interface StockAgentInfo {
   notify_channel_ids: number[]
 }
 
+type AssetType = 'security' | 'fund' | 'unknown'
+
 interface Stock {
   id: number
   symbol: string
   name: string
   market: string
+  asset_type: AssetType
   sort_order?: number
   agents: StockAgentInfo[]
 }
@@ -58,6 +61,7 @@ interface Position {
   symbol: string
   name: string
   market: string
+  asset_type: AssetType
   cost_price: number
   quantity: number
   invested_amount: number | null
@@ -80,6 +84,10 @@ interface AccountSummary {
   available_funds: number
   total_market_value: number
   total_cost: number
+  priced_cost?: number
+  unpriced_cost?: number
+  unpriced_positions?: number
+  valuation_complete?: boolean
   total_pnl: number
   total_pnl_pct: number
   total_daily_pnl: number
@@ -92,6 +100,10 @@ interface PortfolioSummary {
   total: {
     total_market_value: number
     total_cost: number
+    priced_cost?: number
+    unpriced_cost?: number
+    unpriced_positions?: number
+    valuation_complete?: boolean
     total_pnl: number
     total_pnl_pct: number
     total_daily_pnl: number
@@ -124,16 +136,19 @@ interface SearchResult {
   symbol: string
   name: string
   market: string
+  asset_type: AssetType
 }
 
 interface QuoteRequestItem {
   symbol: string
   market: string
+  asset_type: AssetType
 }
 
 interface QuoteResponse {
   symbol: string
   market: string
+  asset_type: AssetType
   current_price: number | null
   change_pct: number | null
 }
@@ -142,6 +157,7 @@ interface StockForm {
   symbol: string
   name: string
   market: string
+  asset_type: AssetType
 }
 
 interface AccountForm {
@@ -160,6 +176,7 @@ interface PositionForm {
   stock_symbol: string
   stock_name: string
   stock_market: string
+  stock_asset_type: AssetType
 }
 
 // 股票建议信息（来自盘中监控 API）
@@ -218,7 +235,7 @@ interface PriceAlertRuleSummary {
   enabled: boolean
 }
 
-const emptyStockForm: StockForm = { symbol: '', name: '', market: 'CN' }
+const emptyStockForm: StockForm = { symbol: '', name: '', market: 'CN', asset_type: 'security' }
 const emptyAccountForm: AccountForm = { name: '', available_funds: '0' }
 
 const round2 = (value: number) => Math.round(value * 100) / 100
@@ -234,12 +251,18 @@ const mergePortfolioQuotes = (
 
   let grandMarketValue = 0
   let grandCost = 0
+  let grandPricedCost = 0
+  let grandUnpricedCost = 0
+  let grandUnpricedPositions = 0
   let grandAvailable = 0
   let grandDailyPnl = 0
 
   const accounts = portfolio.accounts.map(account => {
     let accMarketValue = 0
     let accCost = 0
+    let accPricedCost = 0
+    let accUnpricedCost = 0
+    let accUnpricedPositions = 0
     let accDailyPnl = 0
 
     const positions = account.positions.map(pos => {
@@ -259,11 +282,15 @@ const mergePortfolioQuotes = (
       let daily_pnl_pct: number | null = null
 
       if (current_price != null) {
+        accPricedCost += cost
         market_value = current_price * pos.quantity
         market_value_cny = market_value * rate
         accMarketValue += market_value_cny
         pnl = market_value_cny - cost
         pnl_pct = cost > 0 ? (pnl / cost * 100) : 0
+      } else {
+        accUnpricedCost += cost
+        accUnpricedPositions += 1
       }
 
       if (current_price != null && change_pct != null && change_pct !== -100) {
@@ -290,12 +317,15 @@ const mergePortfolioQuotes = (
       }
     })
 
-    const accPnl = accMarketValue - accCost
-    const accPnlPct = accCost > 0 ? (accPnl / accCost * 100) : 0
+    const accPnl = accMarketValue - accPricedCost
+    const accPnlPct = accPricedCost > 0 ? (accPnl / accPricedCost * 100) : 0
     const accTotalAssets = accMarketValue + account.available_funds
 
     grandMarketValue += accMarketValue
     grandCost += accCost
+    grandPricedCost += accPricedCost
+    grandUnpricedCost += accUnpricedCost
+    grandUnpricedPositions += accUnpricedPositions
     grandAvailable += account.available_funds
     grandDailyPnl += accDailyPnl
 
@@ -303,6 +333,10 @@ const mergePortfolioQuotes = (
       ...account,
       total_market_value: round2(accMarketValue),
       total_cost: round2(accCost),
+      priced_cost: round2(accPricedCost),
+      unpriced_cost: round2(accUnpricedCost),
+      unpriced_positions: accUnpricedPositions,
+      valuation_complete: accUnpricedPositions === 0,
       total_pnl: round2(accPnl),
       total_pnl_pct: round2(accPnlPct),
       total_daily_pnl: round2(accDailyPnl),
@@ -311,8 +345,8 @@ const mergePortfolioQuotes = (
     }
   })
 
-  const grandPnl = grandMarketValue - grandCost
-  const grandPnlPct = grandCost > 0 ? (grandPnl / grandCost * 100) : 0
+  const grandPnl = grandMarketValue - grandPricedCost
+  const grandPnlPct = grandPricedCost > 0 ? (grandPnl / grandPricedCost * 100) : 0
   const grandTotalAssets = grandMarketValue + grandAvailable
 
   return {
@@ -321,6 +355,10 @@ const mergePortfolioQuotes = (
     total: {
       total_market_value: round2(grandMarketValue),
       total_cost: round2(grandCost),
+      priced_cost: round2(grandPricedCost),
+      unpriced_cost: round2(grandUnpricedCost),
+      unpriced_positions: grandUnpricedPositions,
+      valuation_complete: grandUnpricedPositions === 0,
       total_pnl: round2(grandPnl),
       total_pnl_pct: round2(grandPnlPct),
       total_daily_pnl: round2(grandDailyPnl),
@@ -410,7 +448,7 @@ export default function StocksPage() {
 
   // Position form
   const [positionDialogOpen, setPositionDialogOpen] = useState(false)
-  const [positionForm, setPositionForm] = useState<PositionForm>({ account_id: 0, stock_id: 0, cost_price: '', quantity: '', invested_amount: '', trading_style: '', stock_symbol: '', stock_name: '', stock_market: 'CN' })
+  const [positionForm, setPositionForm] = useState<PositionForm>({ account_id: 0, stock_id: 0, cost_price: '', quantity: '', invested_amount: '', trading_style: '', stock_symbol: '', stock_name: '', stock_market: 'CN', stock_asset_type: 'security' })
   const [editPositionId, setEditPositionId] = useState<number | null>(null)
   const [positionDialogAccountId, setPositionDialogAccountId] = useState<number | null>(null)
   const [positionSearchQuery, setPositionSearchQuery] = useState('')
@@ -612,7 +650,7 @@ export default function StocksPage() {
       const key = `${stock.market}:${stock.symbol}`
       if (seen.has(key)) continue
       seen.add(key)
-      items.push({ symbol: stock.symbol, market: stock.market })
+      items.push({ symbol: stock.symbol, market: stock.market, asset_type: stock.asset_type || 'unknown' })
     }
 
     for (const account of portfolioRaw?.accounts || []) {
@@ -620,7 +658,7 @@ export default function StocksPage() {
         const key = `${pos.market}:${pos.symbol}`
         if (seen.has(key)) continue
         seen.add(key)
-        items.push({ symbol: pos.symbol, market: pos.market })
+        items.push({ symbol: pos.symbol, market: pos.market, asset_type: pos.asset_type || 'unknown' })
       }
     }
 
@@ -671,7 +709,7 @@ export default function StocksPage() {
   const refreshKlines = useCallback(async () => {
     if (klineRefreshInFlight.current) return klineRefreshInFlight.current
     const run = (async () => {
-      const items = buildQuoteItems()
+      const items = buildQuoteItems().filter(item => item.asset_type === 'security')
       if (items.length === 0) return
       const limit = 5
       const map: Record<string, KlineSummary> = {}
@@ -992,7 +1030,7 @@ export default function StocksPage() {
   }
 
   const selectStock = (item: SearchResult) => {
-    setStockForm({ symbol: item.symbol, name: item.name, market: item.market })
+    setStockForm({ symbol: item.symbol, name: item.name, market: item.market, asset_type: item.asset_type })
     setSearchQuery(`${item.symbol} ${item.name}`)
     setShowDropdown(false)
   }
@@ -1097,6 +1135,7 @@ export default function StocksPage() {
         stock_symbol: position.symbol,
         stock_name: position.name,
         stock_market: position.market,
+        stock_asset_type: position.asset_type || 'unknown',
       })
       setEditPositionId(position.id)
     } else {
@@ -1110,6 +1149,7 @@ export default function StocksPage() {
         stock_symbol: '',
         stock_name: '',
         stock_market: 'CN',
+        stock_asset_type: 'security',
       })
       setEditPositionId(null)
     }
@@ -1150,6 +1190,7 @@ export default function StocksPage() {
       stock_symbol: item.symbol,
       stock_name: item.name,
       stock_market: item.market,
+      stock_asset_type: existing?.asset_type || item.asset_type,
     })
     setPositionSearchQuery(`${item.symbol} ${item.name}`)
     setShowPositionDropdown(false)
@@ -1168,6 +1209,7 @@ export default function StocksPage() {
               symbol: positionForm.stock_symbol,
               name: positionForm.stock_name,
               market: positionForm.stock_market,
+              asset_type: positionForm.stock_asset_type,
             })
           })
           stockId = newStock.id
@@ -1188,6 +1230,17 @@ export default function StocksPage() {
             return
           }
         }
+      }
+
+      const existingStock = stocks.find(s => s.id === stockId)
+      if (
+        existingStock
+        && existingStock.asset_type !== positionForm.stock_asset_type
+      ) {
+        await fetchAPI(`/stocks/${stockId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ asset_type: positionForm.stock_asset_type }),
+        })
       }
 
       const payload = {
@@ -1634,7 +1687,8 @@ export default function StocksPage() {
           ))}
         </div>
       ) : portfolio ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+        <>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-3">
           <div className="card p-4">
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <TrendingUp className="w-4 h-4" />
@@ -1717,6 +1771,15 @@ export default function StocksPage() {
             </div>
           </div>
         </div>
+        {portfolio.total.valuation_complete === false && (
+          <div className="mb-6 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {portfolio.total.unpriced_positions || 0} 个标的暂缺行情，当前总资产和盈亏仅统计已估值持仓；未估值成本约 {formatMoney(portfolio.total.unpriced_cost || 0)}。
+            </span>
+          </div>
+        )}
+        </>
       ) : null}
 
       {/* Tabs: Positions / Watchlist */}
@@ -1811,22 +1874,51 @@ export default function StocksPage() {
                 <div className="absolute z-50 w-full mt-2 max-h-64 overflow-auto scrollbar card shadow-lg">
                   {searchResults.map(item => (
                     <button
-                      key={`${item.market}-${item.symbol}`}
+                      key={`${item.market}-${item.symbol}-${item.asset_type}`}
                       type="button"
                       onClick={() => selectStock(item)}
                       className="w-full flex items-center gap-3 px-4 py-3 text-[13px] hover:bg-accent/50 text-left transition-colors"
                     >
                       <span className="font-mono text-muted-foreground text-[12px] w-14">{item.symbol}</span>
                       <span className="flex-1 font-medium text-foreground">{item.name}</span>
+                      <Badge variant={item.asset_type === 'fund' ? 'default' : 'outline'}>
+                        {item.asset_type === 'fund' ? '场外基金' : '场内证券'}
+                      </Badge>
                       <Badge variant="secondary">{marketLabel(item.market)}</Badge>
                     </button>
                   ))}
                 </div>
               )}
               {stockForm.symbol && (
-                <div className="mt-2.5 flex items-center gap-2">
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
                   <Badge><span className="font-mono">{stockForm.symbol}</span> {stockForm.name}</Badge>
+                  <Badge variant={stockForm.asset_type === 'fund' ? 'default' : 'outline'}>
+                    {stockForm.asset_type === 'fund' ? '场外基金净值' : '场内行情'}
+                  </Badge>
                   <Badge variant="secondary">{marketLabel(stockForm.market)}</Badge>
+                </div>
+              )}
+              {stockForm.symbol && stockForm.market === 'CN' && (
+                <div className="mt-3">
+                  <Label>估值方式</Label>
+                  <div className="mt-1 flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={stockForm.asset_type === 'security' ? 'default' : 'secondary'}
+                      onClick={() => setStockForm({ ...stockForm, asset_type: 'security' })}
+                    >
+                      场内行情 / K 线
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={stockForm.asset_type === 'fund' ? 'default' : 'secondary'}
+                      onClick={() => setStockForm({ ...stockForm, asset_type: 'fund' })}
+                    >
+                      场外基金净值
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>
@@ -2628,12 +2720,35 @@ export default function StocksPage() {
           </DialogHeader>
           <div className="space-y-4 mt-2">
             {editPositionId ? (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/30">
-                <span className={`text-[9px] px-1.5 py-0.5 rounded ${marketBadge(positionForm.stock_market).style}`}>
-                  {marketBadge(positionForm.stock_market).label}
-                </span>
-                <span className="font-mono text-[12px] text-muted-foreground">{positionForm.stock_symbol}</span>
-                <span className="text-[13px] text-foreground">{positionForm.stock_name}</span>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/30">
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${marketBadge(positionForm.stock_market).style}`}>
+                    {marketBadge(positionForm.stock_market).label}
+                  </span>
+                  <span className="font-mono text-[12px] text-muted-foreground">{positionForm.stock_symbol}</span>
+                  <span className="text-[13px] text-foreground">{positionForm.stock_name}</span>
+                </div>
+                <div>
+                  <Label>估值方式</Label>
+                  <div className="mt-1 flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={positionForm.stock_asset_type === 'security' ? 'default' : 'secondary'}
+                      onClick={() => setPositionForm({ ...positionForm, stock_asset_type: 'security' })}
+                    >
+                      场内行情 / K 线
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={positionForm.stock_asset_type === 'fund' ? 'default' : 'secondary'}
+                      onClick={() => setPositionForm({ ...positionForm, stock_asset_type: 'fund' })}
+                    >
+                      场外基金净值
+                    </Button>
+                  </div>
+                </div>
               </div>
             ) : (
               <div>
@@ -2676,7 +2791,7 @@ export default function StocksPage() {
                     <div className="absolute z-50 w-full mt-1 max-h-48 overflow-auto scrollbar card shadow-lg">
                       {positionSearchResults.map(item => (
                         <button
-                          key={`${item.market}-${item.symbol}`}
+                          key={`${item.market}-${item.symbol}-${item.asset_type}`}
                           type="button"
                           onClick={() => selectPositionStock(item)}
                           className="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-accent/50 text-left transition-colors"
@@ -2686,6 +2801,9 @@ export default function StocksPage() {
                           </span>
                           <span className="font-mono text-muted-foreground text-[12px]">{item.symbol}</span>
                           <span className="flex-1 text-foreground">{item.name}</span>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded ${item.asset_type === 'fund' ? 'bg-violet-500/10 text-violet-600' : 'bg-accent text-muted-foreground'}`}>
+                            {item.asset_type === 'fund' ? '场外基金' : '场内'}
+                          </span>
                         </button>
                       ))}
                     </div>
@@ -2698,16 +2816,45 @@ export default function StocksPage() {
                     </span>
                     <span className="font-mono text-[12px] text-muted-foreground">{positionForm.stock_symbol}</span>
                     <span className="text-[13px] text-foreground">{positionForm.stock_name}</span>
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded ${positionForm.stock_asset_type === 'fund' ? 'bg-violet-500/10 text-violet-600' : 'bg-accent text-muted-foreground'}`}>
+                      {positionForm.stock_asset_type === 'fund' ? '场外基金净值' : '场内行情'}
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
-                        setPositionForm({ ...positionForm, stock_id: 0, stock_symbol: '', stock_name: '', stock_market: '' })
+                        setPositionForm({ ...positionForm, stock_id: 0, stock_symbol: '', stock_name: '', stock_market: '', stock_asset_type: 'security' })
                         setPositionSearchQuery('')
                       }}
                       className="ml-1 text-muted-foreground hover:text-destructive"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
+                  </div>
+                )}
+                {positionForm.stock_symbol && (
+                  <div className="mt-3">
+                    <Label>估值方式</Label>
+                    <div className="mt-1 flex gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={positionForm.stock_asset_type === 'security' ? 'default' : 'secondary'}
+                        onClick={() => setPositionForm({ ...positionForm, stock_asset_type: 'security' })}
+                      >
+                        场内行情 / K 线
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={positionForm.stock_asset_type === 'fund' ? 'default' : 'secondary'}
+                        onClick={() => setPositionForm({ ...positionForm, stock_asset_type: 'fund' })}
+                      >
+                        场外基金净值
+                      </Button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      支付宝、银行等渠道申购的基金请选择“场外基金净值”；证券账户买卖的 ETF/LOF 请选择“场内行情”。
+                    </p>
                   </div>
                 )}
               </div>

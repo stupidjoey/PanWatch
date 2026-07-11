@@ -21,6 +21,11 @@ from src.web.stock_list import search_stocks, refresh_stock_list
 from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
 from src.models.market import MarketCode, MARKETS
 from src.core.agent_catalog import AGENT_KIND_WORKFLOW, infer_agent_kind
+from src.core.asset_types import (
+    ASSET_TYPE_FUND,
+    ASSET_TYPE_SECURITY,
+    normalize_asset_type,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,10 +35,12 @@ class StockCreate(BaseModel):
     symbol: str
     name: str
     market: str = "CN"
+    asset_type: str = ASSET_TYPE_SECURITY
 
 
 class StockUpdate(BaseModel):
     name: str | None = None
+    asset_type: str | None = None
 
 
 class StockAgentInfo(BaseModel):
@@ -48,6 +55,7 @@ class StockResponse(BaseModel):
     symbol: str
     name: str
     market: str
+    asset_type: str
     sort_order: int
     agents: list[StockAgentInfo] = []
 
@@ -81,6 +89,7 @@ def _stock_to_response(stock: Stock) -> dict:
         "symbol": stock.symbol,
         "name": stock.name,
         "market": stock.market,
+        "asset_type": normalize_asset_type(stock.asset_type),
         "sort_order": stock.sort_order or 0,
         "agents": [
             {
@@ -201,24 +210,38 @@ def get_quotes(db: Session = Depends(get_db)):
         except ValueError:
             continue
 
-        symbols = [_tencent_symbol(s.symbol, market_code) for s in stock_list]
-        try:
-            items = _fetch_tencent_quotes(symbols)
-            for item in items:
-                quotes[item["symbol"]] = {
-                    "current_price": item["current_price"],
-                    "change_pct": item["change_pct"],
-                    "change_amount": item["change_amount"],
-                    "prev_close": item["prev_close"],
-                }
-        except Exception as e:
-            logger.error(f"获取 {market} 行情失败: {e}")
+        fund_stocks = [
+            s for s in stock_list if normalize_asset_type(s.asset_type) == ASSET_TYPE_FUND
+        ]
+        market_stocks_for_quote = [s for s in stock_list if s not in fund_stocks]
+
+        if market_stocks_for_quote:
+            symbols = [
+                _tencent_symbol(s.symbol, market_code)
+                for s in market_stocks_for_quote
+            ]
+            try:
+                items = _fetch_tencent_quotes(symbols)
+                for item in items:
+                    quotes[item["symbol"]] = {
+                        "current_price": item["current_price"],
+                        "change_pct": item["change_pct"],
+                        "change_amount": item["change_amount"],
+                        "prev_close": item["prev_close"],
+                    }
+            except Exception as e:
+                logger.error(f"获取 {market} 行情失败: {e}")
 
         # 场外基金腾讯不支持，走东财兜底
         if market_code == MarketCode.CN:
             from src.collectors.akshare_collector import _fetch_eastmoney_fund_quotes
             returned = set(quotes.keys())
-            missing = [s.symbol for s in stock_list if s.symbol not in returned]
+            missing = [s.symbol for s in fund_stocks]
+            missing.extend(
+                s.symbol
+                for s in market_stocks_for_quote
+                if s.symbol not in returned
+            )
             if missing:
                 try:
                     fund_items = _fetch_eastmoney_fund_quotes(missing)
@@ -237,6 +260,7 @@ def get_quotes(db: Session = Depends(get_db)):
 
 @router.post("", response_model=StockResponse)
 def create_stock(stock: StockCreate, db: Session = Depends(get_db)):
+    stock.asset_type = normalize_asset_type(stock.asset_type)
     existing = db.query(Stock).filter(
         Stock.symbol == stock.symbol, Stock.market == stock.market
     ).first()
@@ -276,6 +300,8 @@ def update_stock(stock_id: int, stock: StockUpdate, db: Session = Depends(get_db
         raise HTTPException(404, "股票不存在")
 
     for key, value in stock.model_dump(exclude_unset=True).items():
+        if key == "asset_type":
+            value = normalize_asset_type(value)
         setattr(db_stock, key, value)
 
     db.commit()

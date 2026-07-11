@@ -68,7 +68,6 @@ STOCKS: list[tuple[str, str, str]] = [
     ("Apple", "AAPL", "US"),
     ("Amazon", "AMZN", "US"),
     ("NVIDIA", "NVDA", "US"),
-    ("SK Hynix", "000660", "KR"),
     ("GE Vernova", "GEV", "US"),
     ("NextEra Energy", "NEE", "US"),
     ("Centrus Energy", "LEU", "US"),

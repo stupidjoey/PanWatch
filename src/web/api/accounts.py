@@ -14,6 +14,7 @@ from src.web.models import Account, PriceAlertRule, Position, Stock
 from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
 from src.collectors.market_http import TTLCache
 from src.models.market import MarketCode
+from src.core.asset_types import ASSET_TYPE_FUND, normalize_asset_type
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -406,6 +407,10 @@ def get_portfolio_summary(
                 "total_cost": 0,
                 "total_pnl": 0,
                 "total_pnl_pct": 0,
+                "priced_cost": 0,
+                "unpriced_cost": 0,
+                "unpriced_positions": 0,
+                "valuation_complete": True,
                 "available_funds": 0,
                 "total_assets": 0,
             }
@@ -431,6 +436,9 @@ def get_portfolio_summary(
     account_summaries = []
     grand_total_market_value = 0
     grand_total_cost = 0
+    grand_priced_cost = 0
+    grand_unpriced_cost = 0
+    grand_unpriced_positions = 0
     grand_available_funds = 0
     grand_daily_pnl = 0
 
@@ -438,6 +446,9 @@ def get_portfolio_summary(
         positions_data = []
         acc_market_value = 0
         acc_cost = 0
+        acc_priced_cost = 0
+        acc_unpriced_cost = 0
+        acc_unpriced_positions = 0
         acc_daily_pnl = 0
 
         positions_sorted = sorted(
@@ -480,12 +491,16 @@ def get_portfolio_summary(
             acc_cost += cost_cny
 
             if current_price is not None:
+                acc_priced_cost += cost_cny
                 market_value = current_price * pos.quantity  # 原币种市值
                 market_value_cny = market_value * rate  # 人民币市值
                 pnl = market_value_cny - cost_cny
                 pnl_pct = (pnl / cost_cny * 100) if cost_cny > 0 else 0
 
                 acc_market_value += market_value_cny
+            else:
+                acc_unpriced_cost += cost_cny
+                acc_unpriced_positions += 1
 
             positions_data.append({
                 "id": pos.id,
@@ -493,31 +508,29 @@ def get_portfolio_summary(
                 "symbol": stock.symbol,
                 "name": stock.name,
                 "market": stock.market,
+                "asset_type": normalize_asset_type(stock.asset_type),
                 "cost_price": pos.cost_price,
                 "quantity": pos.quantity,
                 "invested_amount": pos.invested_amount,
                 "sort_order": pos.sort_order or 0,
                 "trading_style": pos.trading_style,
                 "current_price": current_price,
-                "current_price_cny": round(current_price * rate, 2) if current_price else None,
+                "current_price_cny": round(current_price * rate, 2) if current_price is not None else None,
                 "change_pct": change_pct,
-                "market_value": round(market_value, 2) if market_value else None,
-                "market_value_cny": round(market_value_cny, 2) if market_value_cny else None,
-                "pnl": round(pnl, 2) if pnl else None,
-                "pnl_pct": round(pnl_pct, 2) if pnl_pct else None,
+                "market_value": round(market_value, 2) if market_value is not None else None,
+                "market_value_cny": round(market_value_cny, 2) if market_value_cny is not None else None,
+                "pnl": round(pnl, 2) if pnl is not None else None,
+                "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
                 "daily_pnl": round(daily_pnl, 2) if daily_pnl is not None else None,
                 "daily_pnl_pct": round(daily_pnl_pct, 2) if daily_pnl_pct is not None else None,
                 "exchange_rate": rate if is_foreign else None,
             })
 
-        if include_quotes:
-            acc_pnl = acc_market_value - acc_cost
-            acc_pnl_pct = (acc_pnl / acc_cost * 100) if acc_cost > 0 else 0
-            acc_total_assets = acc_market_value + acc.available_funds
-        else:
-            acc_pnl = 0
-            acc_pnl_pct = 0
-            acc_total_assets = acc.available_funds
+        acc_pnl = acc_market_value - acc_priced_cost
+        acc_pnl_pct = (
+            (acc_pnl / acc_priced_cost * 100) if acc_priced_cost > 0 else 0
+        )
+        acc_total_assets = acc_market_value + acc.available_funds
 
         account_summaries.append({
             "id": acc.id,
@@ -525,6 +538,10 @@ def get_portfolio_summary(
             "available_funds": acc.available_funds,
             "total_market_value": round(acc_market_value, 2),
             "total_cost": round(acc_cost, 2),
+            "priced_cost": round(acc_priced_cost, 2),
+            "unpriced_cost": round(acc_unpriced_cost, 2),
+            "unpriced_positions": acc_unpriced_positions,
+            "valuation_complete": acc_unpriced_positions == 0,
             "total_pnl": round(acc_pnl, 2),
             "total_pnl_pct": round(acc_pnl_pct, 2),
             "total_daily_pnl": round(acc_daily_pnl, 2),
@@ -534,17 +551,17 @@ def get_portfolio_summary(
 
         grand_total_market_value += acc_market_value
         grand_total_cost += acc_cost
+        grand_priced_cost += acc_priced_cost
+        grand_unpriced_cost += acc_unpriced_cost
+        grand_unpriced_positions += acc_unpriced_positions
         grand_available_funds += acc.available_funds
         grand_daily_pnl += acc_daily_pnl
 
-    if include_quotes:
-        grand_pnl = grand_total_market_value - grand_total_cost
-        grand_pnl_pct = (grand_pnl / grand_total_cost * 100) if grand_total_cost > 0 else 0
-        grand_total_assets = grand_total_market_value + grand_available_funds
-    else:
-        grand_pnl = 0
-        grand_pnl_pct = 0
-        grand_total_assets = grand_available_funds
+    grand_pnl = grand_total_market_value - grand_priced_cost
+    grand_pnl_pct = (
+        (grand_pnl / grand_priced_cost * 100) if grand_priced_cost > 0 else 0
+    )
+    grand_total_assets = grand_total_market_value + grand_available_funds
 
     # 构建 quotes 字典（用于前端股票列表显示）
     quotes_dict = {}
@@ -560,6 +577,10 @@ def get_portfolio_summary(
         "total": {
             "total_market_value": round(grand_total_market_value, 2),
             "total_cost": round(grand_total_cost, 2),
+            "priced_cost": round(grand_priced_cost, 2),
+            "unpriced_cost": round(grand_unpriced_cost, 2),
+            "unpriced_positions": grand_unpriced_positions,
+            "valuation_complete": grand_unpriced_positions == 0,
             "total_pnl": round(grand_pnl, 2),
             "total_pnl_pct": round(grand_pnl_pct, 2),
             "total_daily_pnl": round(grand_daily_pnl, 2),
@@ -591,19 +612,33 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
         except ValueError:
             continue
 
-        symbols = [_tencent_symbol(s.symbol, market_code) for s in stock_list]
-        try:
-            items = _fetch_tencent_quotes(symbols)
-            for item in items:
-                quotes[item["symbol"]] = item
-        except Exception as e:
-            logger.error(f"获取 {market} 行情失败: {e}")
+        fund_stocks = [
+            s for s in stock_list if normalize_asset_type(s.asset_type) == ASSET_TYPE_FUND
+        ]
+        market_stocks_for_quote = [s for s in stock_list if s not in fund_stocks]
+
+        if market_stocks_for_quote:
+            symbols = [
+                _tencent_symbol(s.symbol, market_code)
+                for s in market_stocks_for_quote
+            ]
+            try:
+                items = _fetch_tencent_quotes(symbols)
+                for item in items:
+                    quotes[item["symbol"]] = item
+            except Exception as e:
+                logger.error(f"获取 {market} 行情失败: {e}")
 
         # 场外基金腾讯不支持，走天天基金兜底
         if market_code == MarketCode.CN:
             from src.collectors.akshare_collector import _fetch_eastmoney_fund_quotes
             returned = set(quotes.keys())
-            missing = [s.symbol for s in stock_list if s.symbol not in returned]
+            missing = [s.symbol for s in fund_stocks]
+            missing.extend(
+                s.symbol
+                for s in market_stocks_for_quote
+                if s.symbol not in returned
+            )
             if missing:
                 try:
                     fund_items = _fetch_eastmoney_fund_quotes(missing)

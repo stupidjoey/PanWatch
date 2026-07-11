@@ -86,6 +86,8 @@ class Stock(Base):
     symbol = Column(String, nullable=False)
     name = Column(String, nullable=False)
     market = Column(String, nullable=False)  # CN / HK / US
+    # security: 股票/场内 ETF/LOF，fund: 场外基金净值，unknown: 待回填
+    asset_type = Column(String, nullable=False, default="security")
     # 以下字段已废弃，持仓信息移至 Position 表
     cost_price = Column(Float, nullable=True)
     quantity = Column(Integer, nullable=True)
