@@ -57,6 +57,17 @@ EASTMONEY_BJ_PARAMS = {
     "fs": "m:0+t:81",  # 北交所
     "fields": "f12,f14",
 }
+
+# 东方财富开放式基金参数（含 ETF 联接等场外基金）
+EASTMONEY_FUND_PARAMS = {
+    "po": "1",
+    "np": "1",
+    "fltt": "2",
+    "invt": "2",
+    "fid": "f12",
+    "fs": "m:0+t:0,m:1+t:0",  # 深/沪开放式基金
+    "fields": "f12,f14",
+}
 PAGE_SIZE = 100
 
 
@@ -201,6 +212,43 @@ def _fetch_bj_from_eastmoney() -> list[dict]:
     return stocks
 
 
+def _fetch_fund_page(client: httpx.Client, page: int) -> list[dict]:
+    """获取东方财富开放式基金列表的单页"""
+    params = {**EASTMONEY_FUND_PARAMS, "pn": str(page), "pz": str(PAGE_SIZE)}
+    resp = client.get(EASTMONEY_URL, params=params, timeout=30, follow_redirects=True)
+    data = resp.json()
+    diff = data.get("data") or {}
+    items = diff.get("diff") or []
+    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in items]
+
+
+def _fetch_fund_from_eastmoney() -> list[dict]:
+    """东方财富开放式基金列表（含 ETF 联接等场外基金）"""
+    with httpx.Client(follow_redirects=True, headers=HEADERS, timeout=30) as client:
+        params = {**EASTMONEY_FUND_PARAMS, "pn": "1", "pz": str(PAGE_SIZE)}
+        resp = client.get(EASTMONEY_URL, params=params)
+        data = resp.json()
+        root = data.get("data") or {}
+        total = root.get("total", 0)
+        first_items = root.get("diff") or []
+
+        funds = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in first_items]
+
+        if total <= PAGE_SIZE:
+            return funds
+
+        pages_needed = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_fund_page, client, pn): pn for pn in range(2, pages_needed + 1)}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    funds.extend(future.result())
+                except Exception as e:
+                    logger.warning(f"东方财富基金第 {futures[future]} 页获取失败: {e}")
+
+    return funds
+
+
 def _fetch_us_page(client: httpx.Client, page: int) -> list[dict]:
     """获取东方财富美股列表的单页"""
     params = {**EASTMONEY_US_PARAMS, "pn": str(page), "pz": str(PAGE_SIZE)}
@@ -298,6 +346,14 @@ def refresh_stock_list() -> list[dict]:
         logger.info(f"东方财富获取北交所列表成功: {len(bj_stocks)} 只")
     except Exception as e:
         logger.warning(f"东方财富获取北交所失败: {e}")
+
+    # 开放式基金: 东方财富（含 ETF 联接等场外基金）
+    try:
+        fund_stocks = _fetch_fund_from_eastmoney()
+        stocks.extend(fund_stocks)
+        logger.info(f"东方财富获取开放式基金列表成功: {len(fund_stocks)} 只")
+    except Exception as e:
+        logger.warning(f"东方财富获取开放式基金失败: {e}")
 
     if stocks:
         _save_cache(stocks)

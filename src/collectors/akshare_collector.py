@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 # 腾讯股票行情 API（HTTP，GBK 编码）
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
 
+# 东财基金行情 API（场外开放式基金，腾讯不支持）
+EASTMONEY_FUND_QUOTE_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
+EASTMONEY_FUND_QUOTE_PARAMS = {
+    "fltt": "2",
+    "fields": "f2,f3,f4,f12,f14,f15,f16,f17",
+}
+
 # 实时报价短 TTL 缓存 + 按 host 节流:平抑模拟盘/价格提醒每 60s 的批量并发突发。
 _QUOTE_HOST = "qt.gtimg.cn"
 _QUOTE_MIN_INTERVAL_S = 0.15
@@ -171,6 +178,70 @@ def _fetch_tencent_quotes(symbols: list[str]) -> list[dict]:
     return results
 
 
+def _fetch_eastmoney_fund_quotes(symbols: list[str]) -> list[dict]:
+    """批量获取场外开放式基金净值（东财 API，腾讯不支持场外基金）。"""
+    if not symbols:
+        return []
+    from src.core.cn_symbol import is_cn_sh
+    secids = [f"{'1' if is_cn_sh(s) else '0'}.{s}" for s in symbols]
+    cache_key = "fund:" + ",".join(secids)
+    cached = _QUOTE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    params = {
+        **EASTMONEY_FUND_QUOTE_PARAMS,
+        "secids": ",".join(secids),
+    }
+    import json as _json
+    content = market_get(
+        EASTMONEY_FUND_QUOTE_URL,
+        host_key="push2.eastmoney.com",
+        min_interval_s=0.5,
+        timeout=10,
+        retries=2,
+        parse="text",
+        log_label="东财基金净值",
+        params=params,
+    )
+    if not content:
+        return []
+
+    try:
+        data = _json.loads(content)
+    except Exception:
+        logger.warning("东财基金行情 JSON 解析失败")
+        return []
+
+    items = (data.get("data") or {}).get("diff") or []
+    results = []
+    for item in items:
+        price = float(item.get("f2") or 0)
+        if price <= 0:
+            continue
+        results.append({
+            "name": str(item.get("f14") or ""),
+            "symbol": str(item.get("f12") or ""),
+            "current_price": price,
+            "prev_close": float(item.get("f4") or 0),
+            "open_price": price,
+            "high_price": float(item.get("f15") or price),
+            "low_price": float(item.get("f16") or price),
+            "volume": 0,
+            "turnover": 0,
+            "change_amount": round(price - float(item.get("f4") or 0), 4),
+            "change_pct": float(item.get("f3") or 0),
+            "turnover_rate": None,
+            "volume_ratio": None,
+            "pe_ratio": None,
+            "circulating_market_value": None,
+            "total_market_value": None,
+        })
+    if results:
+        _QUOTE_CACHE.set(cache_key, results)
+    return results
+
+
 class BaseCollector(ABC):
     """数据采集器抽象基类"""
 
@@ -230,12 +301,25 @@ class AkshareCollector(BaseCollector):
 
     def _get_cn_stocks(self, symbols: list[str]) -> list[StockData]:
         tencent_symbols = [_tencent_symbol(s, MarketCode.CN) for s in symbols]
+        stock_items = []
         try:
-            items = _fetch_tencent_quotes(tencent_symbols)
+            stock_items = _fetch_tencent_quotes(tencent_symbols)
         except Exception as e:
             logger.error(f"获取 A 股行情失败: {e}")
-            return []
 
+        # 找出腾讯未返回的 symbol（场外基金腾讯不支持，走东财）
+        returned_symbols = {item["symbol"] for item in stock_items}
+        missing = [s for s in symbols if s not in returned_symbols]
+        fund_items = []
+        if missing:
+            try:
+                fund_items = _fetch_eastmoney_fund_quotes(missing)
+                if fund_items:
+                    logger.debug(f"东财基金净值获取成功: {len(fund_items)} 只")
+            except Exception as e:
+                logger.debug(f"东财基金净值获取失败: {e}")
+
+        all_items = stock_items + fund_items
         return [
             StockData(
                 symbol=item["symbol"],
@@ -252,7 +336,7 @@ class AkshareCollector(BaseCollector):
                 prev_close=item["prev_close"],
                 timestamp=datetime.now(),
             )
-            for item in items
+            for item in all_items
         ]
 
     def _get_hk_stocks(self, symbols: list[str]) -> list[StockData]:
