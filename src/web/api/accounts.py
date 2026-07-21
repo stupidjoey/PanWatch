@@ -636,7 +636,7 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
             except Exception as e:
                 logger.error(f"获取 {market} 行情失败: {e}")
 
-        # 场外基金腾讯不支持，走天天基金兜底
+        # 场外基金腾讯不支持，走东方财富单位净值兜底
         if market_code == MarketCode.CN:
             from src.collectors.akshare_collector import _fetch_eastmoney_fund_quotes
             returned = set(quotes.keys())
@@ -652,7 +652,7 @@ def _fetch_quotes_for_stocks(stocks: list[Stock]) -> dict:
                     for item in fund_items:
                         quotes[item["symbol"]] = item
                 except Exception as e:
-                    logger.debug(f"天天基金净值获取失败: {e}")
+                    logger.debug(f"东方财富基金净值获取失败: {e}")
 
     return quotes
 

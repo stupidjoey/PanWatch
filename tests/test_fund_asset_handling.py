@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from src.collectors import akshare_collector
 from src.core.asset_types import ASSET_TYPE_FUND, ASSET_TYPE_SECURITY
 from src.web import models as M
 from src.web.api import accounts as accounts_api
@@ -241,3 +242,81 @@ def test_fund_quote_path_skips_tencent_market_quote(monkeypatch):
     assert requested_market_symbols == ["sh600519"]
     assert requested_fund_symbols == ["003156"]
     assert set(result) == {"003156", "600519"}
+
+
+def test_eastmoney_fund_nav_payload_uses_latest_two_values():
+    """场外基金行情使用最新单位净值，并保留净值日期。"""
+    result = akshare_collector._parse_eastmoney_fund_nav_payload(
+        "003156",
+        {
+            "ErrCode": 0,
+            "Data": {
+                "LSJZList": [
+                    {"FSRQ": "2026-07-21", "DWJZ": "1.1839", "JZZZL": "0.00"},
+                    {"FSRQ": "2026-07-20", "DWJZ": "1.1837", "JZZZL": "-0.02"},
+                ]
+            },
+        },
+    )
+
+    assert result is not None
+    assert result["symbol"] == "003156"
+    assert result["current_price"] == 1.1839
+    assert result["prev_close"] == 1.1837
+    assert result["change_amount"] == 0.0002
+    assert result["change_pct"] == 0.0
+    assert result["quote_date"] == "2026-07-21"
+    assert result["asset_type"] == ASSET_TYPE_FUND
+
+
+def test_eastmoney_fund_nav_payload_calculates_missing_change_pct():
+    """上游未给涨跌幅时，使用相邻两期单位净值计算。"""
+    result = akshare_collector._parse_eastmoney_fund_nav_payload(
+        "006327",
+        {
+            "ErrCode": 0,
+            "Data": {
+                "LSJZList": [
+                    {"FSRQ": "2026-07-20", "DWJZ": "0.9011", "JZZZL": ""},
+                    {"FSRQ": "2026-07-17", "DWJZ": "0.8736", "JZZZL": "-3.36"},
+                ]
+            },
+        },
+    )
+
+    assert result is not None
+    assert result["change_pct"] == 3.15
+
+
+def test_eastmoney_fund_nav_payload_rejects_empty_response():
+    assert akshare_collector._parse_eastmoney_fund_nav_payload(
+        "003156", {"ErrCode": 0, "Data": {"LSJZList": []}}
+    ) is None
+
+
+def test_fund_quote_fetch_uses_current_eastmoney_nav_api(monkeypatch):
+    """基金净值不再请求已经返回 404 页面内容的旧 fundgz 接口。"""
+    calls = []
+
+    def fake_market_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return {
+            "ErrCode": 0,
+            "Data": {
+                "LSJZList": [
+                    {"FSRQ": "2026-07-21", "DWJZ": "1.2000", "JZZZL": "0.84"},
+                    {"FSRQ": "2026-07-20", "DWJZ": "1.1900", "JZZZL": "0.00"},
+                ]
+            },
+        }
+
+    akshare_collector._QUOTE_CACHE.clear()
+    monkeypatch.setattr(akshare_collector, "market_get", fake_market_get)
+
+    result = akshare_collector._fetch_eastmoney_fund_quotes(["009999"])
+
+    assert result[0]["current_price"] == 1.2
+    assert len(calls) == 1
+    assert calls[0][0] == akshare_collector.EASTMONEY_FUND_NAV_URL
+    assert calls[0][1]["params"]["fundCode"] == "009999"
+    assert calls[0][1]["parse"] == "json"

@@ -14,8 +14,15 @@ logger = logging.getLogger(__name__)
 # 腾讯股票行情 API（HTTP，GBK 编码）
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
 
-# 天天基金行情 API（场外开放式基金，腾讯/东财 push2 不支持）
-TIANTIAN_FUND_URL = "http://fundgz.1234567.com.cn/js/{code}.js"
+# 东方财富场外基金历史净值 API（腾讯/东财 push2 不支持场外基金）
+EASTMONEY_FUND_NAV_URL = "https://api.fund.eastmoney.com/f10/lsjz"
+_FUND_NAV_HOST = "api.fund.eastmoney.com"
+_FUND_NAV_MIN_INTERVAL_S = 0.05
+_FUND_NAV_CACHE_TTL_SEC = 300.0
+_FUND_NAV_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://fundf10.eastmoney.com/",
+}
 
 # 实时报价短 TTL 缓存 + 按 host 节流:平抑模拟盘/价格提醒每 60s 的批量并发突发。
 _QUOTE_HOST = "qt.gtimg.cn"
@@ -174,71 +181,109 @@ def _fetch_tencent_quotes(symbols: list[str]) -> list[dict]:
     return results
 
 
+def _parse_eastmoney_fund_nav_payload(code: str, payload: dict | None) -> dict | None:
+    """把东方财富最新两期单位净值转换为统一行情结构。"""
+    if not isinstance(payload, dict) or payload.get("ErrCode") not in (None, 0):
+        return None
+
+    data = payload.get("Data") or {}
+    raw_rows = data.get("LSJZList") or []
+    nav_rows: list[tuple[float, str, float | None]] = []
+    for row in raw_rows:
+        try:
+            nav = float(row.get("DWJZ") or 0)
+        except (TypeError, ValueError):
+            continue
+        if nav <= 0:
+            continue
+        try:
+            change_pct = float(row.get("JZZZL"))
+        except (TypeError, ValueError):
+            change_pct = None
+        nav_rows.append((nav, str(row.get("FSRQ") or ""), change_pct))
+
+    if not nav_rows:
+        return None
+
+    current, quote_date, reported_change_pct = nav_rows[0]
+    previous = nav_rows[1][0] if len(nav_rows) > 1 else current
+    change_amount = current - previous
+    change_pct = reported_change_pct
+    if change_pct is None:
+        change_pct = change_amount / previous * 100 if previous else 0.0
+
+    return {
+        "name": "",
+        "symbol": code,
+        "current_price": round(current, 4),
+        "prev_close": round(previous, 4),
+        "open_price": round(current, 4),
+        "high_price": round(current, 4),
+        "low_price": round(current, 4),
+        "volume": 0,
+        "turnover": 0,
+        "change_amount": round(change_amount, 4),
+        "change_pct": round(change_pct, 2),
+        "turnover_rate": None,
+        "volume_ratio": None,
+        "pe_ratio": None,
+        "circulating_market_value": None,
+        "total_market_value": None,
+        "quote_date": quote_date,
+        "asset_type": "fund",
+    }
+
+
 def _fetch_eastmoney_fund_quotes(symbols: list[str]) -> list[dict]:
-    """批量获取场外开放式基金净值（天天基金 API，腾讯和东财 push2 不支持场外基金）。"""
+    """批量获取场外开放式基金最新单位净值。"""
     if not symbols:
         return []
-    cache_key = "fund:" + ",".join(symbols)
+    normalized_symbols = list(
+        dict.fromkeys(str(symbol).strip() for symbol in symbols)
+    )
+    cache_key = "fund:" + ",".join(sorted(normalized_symbols))
     cached = _QUOTE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    import re, concurrent.futures
-    import httpx as _httpx
+    import concurrent.futures
 
     def _fetch_one(code: str) -> dict | None:
-        try:
-            url = TIANTIAN_FUND_URL.format(code=code)
-            with _httpx.Client(timeout=5, follow_redirects=True) as client:
-                resp = client.get(url)
-                if resp.status_code != 200:
-                    return None
-                text = resp.text
-            # Parse jsonpgz({...}) format
-            m = re.search(r"jsonpgz\((.*)\)", text)
-            if not m:
-                return None
-            import json as _json
-            data = _json.loads(m.group(1))
-            gsz = float(data.get("gsz") or 0)
-            dwjz = float(data.get("dwjz") or 0)
-            if gsz <= 0:
-                gsz = dwjz
-            if gsz <= 0:
-                return None
-            gszzl = float(data.get("gszzl") or 0)
-            return {
-                "name": str(data.get("name") or ""),
-                "symbol": str(data.get("fundcode") or code),
-                "current_price": round(gsz, 4),
-                "prev_close": round(dwjz, 4),
-                "open_price": round(dwjz, 4),
-                "high_price": round(gsz, 4),
-                "low_price": round(gsz, 4),
-                "volume": 0,
-                "turnover": 0,
-                "change_amount": round(gsz - dwjz, 4),
-                "change_pct": round(gszzl, 2),
-                "turnover_rate": None,
-                "volume_ratio": None,
-                "pe_ratio": None,
-                "circulating_market_value": None,
-                "total_market_value": None,
-            }
-        except Exception as e:
-            logger.debug(f"天天基金净值获取失败 {code}: {e}")
-            return None
+        payload = market_get(
+            EASTMONEY_FUND_NAV_URL,
+            host_key=_FUND_NAV_HOST,
+            params={"fundCode": code, "pageIndex": 1, "pageSize": 2},
+            headers=_FUND_NAV_HEADERS,
+            min_interval_s=_FUND_NAV_MIN_INTERVAL_S,
+            timeout=8,
+            retries=1,
+            parse="json",
+            symbol=code,
+            log_label="东方财富基金净值",
+        )
+        return _parse_eastmoney_fund_nav_payload(code, payload)
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_fetch_one, s): s for s in symbols}
+        futures = {
+            pool.submit(_fetch_one, symbol): symbol
+            for symbol in normalized_symbols
+        }
         for future in concurrent.futures.as_completed(futures):
-            item = future.result()
+            try:
+                item = future.result()
+            except Exception as exc:
+                logger.debug(
+                    "东方财富基金净值获取失败 %s: %s",
+                    futures[future],
+                    exc,
+                )
+                item = None
             if item:
                 results.append(item)
 
     if results:
-        _QUOTE_CACHE.set(cache_key, results)
+        _QUOTE_CACHE.set(cache_key, results, ttl_sec=_FUND_NAV_CACHE_TTL_SEC)
     return results
 
 

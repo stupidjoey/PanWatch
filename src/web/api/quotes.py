@@ -185,7 +185,7 @@ async def get_quotes_batch(payload: QuoteBatchRequest):
         else:
             quotes_by_market[market_code] = {}
 
-        # 场外基金腾讯不支持，走天天基金兜底
+        # 场外基金腾讯不支持，走东方财富单位净值兜底
         if market_code == MarketCode.CN:
             cn_quotes = quotes_by_market.get(MarketCode.CN, {})
             missing = [s for s in symbols if s not in cn_quotes]
@@ -196,7 +196,7 @@ async def get_quotes_batch(payload: QuoteBatchRequest):
                     for item in fund_items:
                         cn_quotes[item["symbol"]] = item
                 except Exception as e:
-                    logger.warning(f"天天基金净值获取失败: {e}")
+                    logger.warning(f"东方财富基金净值获取失败: {e}")
 
     if fund_symbols:
         cn_quotes = quotes_by_market.setdefault(MarketCode.CN, {})
