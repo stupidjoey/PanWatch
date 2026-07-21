@@ -7,7 +7,7 @@ import math
 import threading
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
@@ -188,6 +188,121 @@ def capture_all_valuations(
     return batch_id
 
 
+def capture_event_valuation_pair(
+    db: Session,
+    *,
+    account_id: int,
+    cash_before_base: Decimal,
+    cash_delta_base: Decimal,
+    securities_delta_base: Decimal = Decimal("0"),
+    recorded_at: datetime,
+) -> tuple[str, str]:
+    """无网络地写入流水前后估值，确保保存操作能立即完成。
+
+    流水期间沿用各账户最近一次行情估值，只对目标账户应用已知的现金和
+    证券变化。实时/收盘价格仍由后台每日估值任务更新。
+    """
+    stamp = _utc_naive(recorded_at)
+    before_stamp = stamp - timedelta(microseconds=1)
+    after_stamp = stamp + timedelta(microseconds=1)
+    before_batch = uuid.uuid4().hex
+    after_batch = uuid.uuid4().hex
+    accounts = (
+        db.query(Account)
+        .filter((Account.enabled == True) | (Account.id == account_id))  # noqa: E712
+        .order_by(Account.id)
+        .all()
+    )
+
+    fallback_rates = {
+        "CN": Decimal("1"),
+        "HK": Decimal("0.92"),
+        "US": Decimal("7.25"),
+    }
+    for account in accounts:
+        latest = (
+            db.query(PortfolioValuationSnapshot)
+            .filter(PortfolioValuationSnapshot.account_id == account.id)
+            .order_by(
+                PortfolioValuationSnapshot.valued_at.desc(),
+                PortfolioValuationSnapshot.id.desc(),
+            )
+            .first()
+        )
+        if latest:
+            cash = _d(latest.cash_value_base)
+            securities = _d(latest.securities_value_base)
+            complete = bool(latest.valuation_complete)
+            missing = int(latest.missing_price_count or 0)
+        else:
+            positions = (
+                db.query(Position)
+                .filter(Position.account_id == account.id)
+                .all()
+            )
+            stocks = {
+                stock.id: stock
+                for stock in db.query(Stock)
+                .filter(Stock.id.in_({position.stock_id for position in positions}))
+                .all()
+            } if positions else {}
+            cash = _d(account.available_funds)
+            securities = sum(
+                _d(position.cost_price)
+                * _d(position.quantity)
+                * fallback_rates.get(stocks[position.stock_id].market, Decimal("1"))
+                for position in positions
+                if position.stock_id in stocks
+            )
+            complete = not positions
+            missing = len(positions)
+
+        if account.id == account_id:
+            # 账户现金是强事实；用它校准可能较旧的估值快照。
+            cash = _d(cash_before_base)
+
+        before_total = cash + securities
+        db.add(
+            PortfolioValuationSnapshot(
+                account_id=account.id,
+                batch_id=before_batch,
+                kind="event_before",
+                cash_value_base=_money(cash),
+                securities_value_base=_money(securities),
+                total_value_base=_money(before_total),
+                valuation_complete=complete,
+                missing_price_count=missing,
+                valued_at=before_stamp,
+                created_at=stamp,
+            )
+        )
+
+        after_cash = cash
+        after_securities = securities
+        if account.id == account_id:
+            after_cash += _d(cash_delta_base)
+            after_securities = max(
+                Decimal("0"),
+                after_securities + _d(securities_delta_base),
+            )
+        db.add(
+            PortfolioValuationSnapshot(
+                account_id=account.id,
+                batch_id=after_batch,
+                kind="event_after",
+                cash_value_base=_money(after_cash),
+                securities_value_base=_money(after_securities),
+                total_value_base=_money(after_cash + after_securities),
+                valuation_complete=complete,
+                missing_price_count=missing,
+                valued_at=after_stamp,
+                created_at=stamp,
+            )
+        )
+    db.flush()
+    return before_batch, after_batch
+
+
 def _idempotent_result(
     db: Session,
     key: str | None,
@@ -251,13 +366,23 @@ def record_sell(
         if actual_net <= 0:
             raise PortfolioLedgerError("实际到账金额必须大于 0")
 
-        capture_all_valuations(db, kind="event_before")
         recorded_at = _utc_naive()
+        cash_before_base = _d(account.available_funds)
         cost_basis_base = _money(_d(position.cost_price) * _d(quantity) * fx_rate)
         net_base = _money(actual_net * fx_rate)
+        gross_base = _money(gross * fx_rate)
         realized_base = _money(net_base - cost_basis_base)
         previous_quantity = int(position.quantity)
         remaining = previous_quantity - quantity
+
+        capture_event_valuation_pair(
+            db,
+            account_id=account.id,
+            cash_before_base=cash_before_base,
+            cash_delta_base=net_base,
+            securities_delta_base=-gross_base,
+            recorded_at=recorded_at,
+        )
 
         row = PortfolioTransaction(
             account_id=account.id,
@@ -294,7 +419,6 @@ def record_sell(
                 )
 
         db.flush()
-        capture_all_valuations(db, kind="event_after")
         db.commit()
         db.refresh(row)
         logger.info(
@@ -337,8 +461,14 @@ def record_dividend(
         currency_code = (currency or default_currency_for_market(stock.market)).upper()
         fx_rate = resolve_fx_rate(currency_code)
         amount_base = _money(actual * fx_rate)
-        capture_all_valuations(db, kind="event_before")
         recorded_at = _utc_naive()
+        capture_event_valuation_pair(
+            db,
+            account_id=account.id,
+            cash_before_base=_d(account.available_funds),
+            cash_delta_base=amount_base,
+            recorded_at=recorded_at,
+        )
         row = PortfolioTransaction(
             account_id=account.id,
             stock_id=stock.id,
@@ -359,7 +489,6 @@ def record_dividend(
         db.add(row)
         account.available_funds = float(_money(_d(account.available_funds) + amount_base))
         db.flush()
-        capture_all_valuations(db, kind="event_after")
         db.commit()
         db.refresh(row)
         logger.info(
@@ -403,8 +532,14 @@ def record_cash_flow(
         if _d(account.available_funds) + delta < 0:
             raise PortfolioLedgerError("出金金额不能超过账户可用资金")
 
-        capture_all_valuations(db, kind="event_before")
         recorded_at = _utc_naive()
+        capture_event_valuation_pair(
+            db,
+            account_id=account.id,
+            cash_before_base=_d(account.available_funds),
+            cash_delta_base=delta,
+            recorded_at=recorded_at,
+        )
         row = PortfolioTransaction(
             account_id=account.id,
             event_type=event,
@@ -421,7 +556,6 @@ def record_cash_flow(
         db.add(row)
         account.available_funds = float(_money(_d(account.available_funds) + delta))
         db.flush()
-        capture_all_valuations(db, kind="event_after")
         db.commit()
         db.refresh(row)
         return row, False

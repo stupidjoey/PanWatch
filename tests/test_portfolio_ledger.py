@@ -49,13 +49,13 @@ def ledger_db(monkeypatch):
 
     from src.web.api import accounts as accounts_api
 
+    def reject_quote_fetch(_stocks):
+        raise AssertionError("记录投资流水时不应请求实时行情")
+
     monkeypatch.setattr(
         accounts_api,
         "_fetch_quotes_for_stocks",
-        lambda stocks: {
-            s.symbol: {"symbol": s.symbol, "current_price": 10.0, "change_pct": 0.0}
-            for s in stocks
-        },
+        reject_quote_fetch,
     )
     monkeypatch.setattr(accounts_api, "get_hkd_cny_rate", lambda: 0.92)
     monkeypatch.setattr(accounts_api, "get_usd_cny_rate", lambda: 7.25)
