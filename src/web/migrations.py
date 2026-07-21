@@ -1609,6 +1609,84 @@ WHERE market IN ('HK', 'US')
     )
 
 
+def _m120_portfolio_ledger(conn: Connection) -> None:
+    """真实账户流水与估值快照，为卖出、分红和年度收益提供数据基础。"""
+    conn.execute(
+        text(
+            """
+CREATE TABLE IF NOT EXISTS portfolio_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  stock_id INTEGER REFERENCES stocks(id) ON DELETE SET NULL,
+  position_id_snapshot INTEGER,
+  event_type TEXT NOT NULL,
+  stock_symbol TEXT DEFAULT '',
+  stock_name TEXT DEFAULT '',
+  stock_market TEXT DEFAULT '',
+  quantity NUMERIC(24, 8),
+  unit_price NUMERIC(24, 8),
+  gross_amount NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  net_amount NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  cash_delta_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  cost_basis_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  realized_pnl_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'CNY',
+  fx_rate_to_base NUMERIC(24, 10) NOT NULL DEFAULT 1,
+  occurred_at DATETIME NOT NULL,
+  recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  idempotency_key TEXT UNIQUE,
+  note TEXT DEFAULT ''
+)
+"""
+        )
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_portfolio_tx_account_occurred",
+        "CREATE INDEX ix_portfolio_tx_account_occurred ON portfolio_transactions(account_id, occurred_at)",
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_portfolio_tx_stock_occurred",
+        "CREATE INDEX ix_portfolio_tx_stock_occurred ON portfolio_transactions(stock_id, occurred_at)",
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_portfolio_tx_type_occurred",
+        "CREATE INDEX ix_portfolio_tx_type_occurred ON portfolio_transactions(event_type, occurred_at)",
+    )
+
+    conn.execute(
+        text(
+            """
+CREATE TABLE IF NOT EXISTS portfolio_valuation_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  batch_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'manual',
+  cash_value_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  securities_value_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  total_value_base NUMERIC(24, 8) NOT NULL DEFAULT 0,
+  valuation_complete BOOLEAN NOT NULL DEFAULT 1,
+  missing_price_count INTEGER NOT NULL DEFAULT 0,
+  valued_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+        )
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_portfolio_val_account_time",
+        "CREATE INDEX ix_portfolio_val_account_time ON portfolio_valuation_snapshots(account_id, valued_at)",
+    )
+    _create_index_if_missing(
+        conn,
+        "ix_portfolio_val_batch",
+        "CREATE INDEX ix_portfolio_val_batch ON portfolio_valuation_snapshots(batch_id)",
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -1629,6 +1707,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(117, "chat_initial_context", _m117_chat_initial_context),
     Migration(118, "paper_trading_market_allocations", _m118_paper_trading_market_allocations),
     Migration(119, "stock_asset_type", _m119_stock_asset_type),
+    Migration(120, "portfolio_ledger_and_valuations", _m120_portfolio_ledger),
 )
 
 

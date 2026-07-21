@@ -10,7 +10,7 @@ WORKDIR /app/frontend
 RUN npm install -g pnpm
 
 # 复制依赖文件
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 
 # 安装依赖
 RUN pnpm install --frozen-lockfile

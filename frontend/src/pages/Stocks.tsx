@@ -17,6 +17,11 @@ import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import StockInsightModal from '@panwatch/biz-ui/components/stock-insight-modal'
 import { DeepAnalysisModal } from '@panwatch/biz-ui/components/deep-analysis-modal'
 import StockPriceAlertPanel from '@panwatch/biz-ui/components/stock-price-alert-panel'
+import SellDialog, { type SellTarget } from '@/components/portfolio/SellDialog'
+import DividendDialog from '@/components/portfolio/DividendDialog'
+import CashFlowDialog from '@/components/portfolio/CashFlowDialog'
+import TransactionsPanel from '@/components/portfolio/TransactionsPanel'
+import PerformancePanel from '@/components/portfolio/PerformancePanel'
 
 interface AgentResult {
   success?: boolean
@@ -397,8 +402,14 @@ export default function StocksPage() {
   // Alerts / Scanning
   const [scanning, setScanning] = useState(false)
 
-  type ViewTab = 'positions' | 'watchlist'
+  type ViewTab = 'positions' | 'transactions' | 'performance' | 'watchlist'
   const [viewTab, setViewTab] = useLocalStorage<ViewTab>('panwatch_stocks_viewTab', 'positions')
+  const [sellTarget, setSellTarget] = useState<SellTarget | null>(null)
+  const [dividendDialogOpen, setDividendDialogOpen] = useState(false)
+  const [dividendTarget, setDividendTarget] = useState<{ accountId: number | null; stockId: number | null }>({ accountId: null, stockId: null })
+  const [cashFlowDialogOpen, setCashFlowDialogOpen] = useState(false)
+  const [cashFlowType, setCashFlowType] = useState<'DEPOSIT' | 'WITHDRAWAL'>('DEPOSIT')
+  const [ledgerRefreshKey, setLedgerRefreshKey] = useState(0)
 
   // 股票 AI 建议（来自盘中监控 API）
   const [suggestions] = useState<Record<string, StockSuggestionData>>({})
@@ -640,6 +651,36 @@ export default function StocksPage() {
     } finally {
       setPortfolioLoading(false)
     }
+  }
+
+  const handleLedgerSaved = async () => {
+    setLedgerRefreshKey(key => key + 1)
+    await Promise.all([load(), loadPortfolio()])
+  }
+
+  const openSellDialog = (account: AccountSummary, position: Position) => {
+    setSellTarget({
+      positionId: position.id,
+      accountId: account.id,
+      accountName: account.name,
+      stockId: position.stock_id,
+      symbol: position.symbol,
+      name: position.name,
+      market: position.market,
+      quantity: position.quantity,
+      costPrice: position.cost_price,
+      currentPrice: position.current_price,
+    })
+  }
+
+  const openDividendDialog = (accountId: number | null = null, stockId: number | null = null) => {
+    setDividendTarget({ accountId, stockId })
+    setDividendDialogOpen(true)
+  }
+
+  const openCashFlowDialog = (type: 'DEPOSIT' | 'WITHDRAWAL') => {
+    setCashFlowType(type)
+    setCashFlowDialogOpen(true)
   }
 
   const buildQuoteItems = useCallback((): QuoteRequestItem[] => {
@@ -1088,14 +1129,19 @@ export default function StocksPage() {
 
   const handleAccountSubmit = async () => {
     try {
-      const payload = {
-        name: accountForm.name,
-        available_funds: parseFloat(accountForm.available_funds) || 0,
-      }
       if (editAccountId) {
-        await fetchAPI(`/accounts/${editAccountId}`, { method: 'PUT', body: JSON.stringify(payload) })
+        await fetchAPI(`/accounts/${editAccountId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: accountForm.name }),
+        })
       } else {
-        await fetchAPI('/accounts', { method: 'POST', body: JSON.stringify(payload) })
+        await fetchAPI('/accounts', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: accountForm.name,
+            available_funds: parseFloat(accountForm.available_funds) || 0,
+          }),
+        })
       }
       setAccountDialogOpen(false)
       load()
@@ -1265,7 +1311,7 @@ export default function StocksPage() {
   }
 
   const handleDeletePosition = async (id: number) => {
-    if (!confirm('确定删除该持仓？')) return
+    if (!confirm('仅在持仓录入错误时删除。正常减仓或清仓请使用“记录卖出”。确定删除这条持仓吗？')) return
     try {
       await fetchAPI(`/positions/${id}`, { method: 'DELETE' })
       loadPortfolio()
@@ -1782,7 +1828,7 @@ export default function StocksPage() {
         </>
       ) : null}
 
-      {/* Tabs: Positions / Watchlist */}
+      {/* Tabs: Positions / Ledger / Performance / Watchlist */}
       <div className="mb-4">
         <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-accent/30">
           <button
@@ -1794,6 +1840,26 @@ export default function StocksPage() {
             }`}
           >
             持仓 <span className="ml-1 font-mono text-[11px] opacity-70">{positionsCount}</span>
+          </button>
+          <button
+            onClick={() => setViewTab('transactions')}
+            className={`px-3 py-1.5 rounded-md text-[12px] transition-colors ${
+              viewTab === 'transactions'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            流水
+          </button>
+          <button
+            onClick={() => setViewTab('performance')}
+            className={`px-3 py-1.5 rounded-md text-[12px] transition-colors ${
+              viewTab === 'performance'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            收益
           </button>
           <button
             onClick={() => setViewTab('watchlist')}
@@ -2184,8 +2250,10 @@ export default function StocksPage() {
                                       />
                                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(pos.name)} title="相关资讯"><Newspaper className="w-3 h-3" /></Button>
                                       <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-primary" title="深度分析(TradingAgents)" onClick={() => openDeepAnalysis(pos.stock_id, pos.symbol, pos.name)}><Brain className="w-3 h-3" /></Button>
-                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
-                                      <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7 text-amber-600" onClick={() => openSellDialog(account, pos)} title="记录卖出"><ArrowUpRight className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7 text-rose-500" onClick={() => openDividendDialog(account.id, pos.stock_id)} title="记录分红"><PiggyBank className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)} title="纠正持仓录入"><Pencil className="w-3 h-3" /></Button>
+                                      <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)} title="删除错误录入"><Trash2 className="w-3 h-3" /></Button>
                                     </div>
                                   </td>
                                 </tr>
@@ -2350,8 +2418,10 @@ export default function StocksPage() {
                                   />
                                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openNewsDialog(pos.name)}><Newspaper className="w-3 h-3" /></Button>
                                   <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-primary" title="深度分析(TradingAgents)" onClick={() => openDeepAnalysis(pos.stock_id, pos.symbol, pos.name)}><Brain className="w-3 h-3" /></Button>
-                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)}><Pencil className="w-3 h-3" /></Button>
-                                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)}><Trash2 className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-amber-600" onClick={() => openSellDialog(account, pos)} title="记录卖出"><ArrowUpRight className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-rose-500" onClick={() => openDividendDialog(account.id, pos.stock_id)} title="记录分红"><PiggyBank className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openPositionDialog(account.id, pos)} title="纠正持仓录入"><Pencil className="w-3 h-3" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:text-destructive" onClick={() => handleDeletePosition(pos.id)} title="删除错误录入"><Trash2 className="w-3 h-3" /></Button>
                                 </div>
                               </div>
                             </div>
@@ -2366,6 +2436,19 @@ export default function StocksPage() {
           ))}
         </div>
         )
+      )}
+
+      {viewTab === 'transactions' && (
+        <TransactionsPanel
+          accounts={accounts}
+          refreshKey={ledgerRefreshKey}
+          onDividend={() => openDividendDialog()}
+          onCashFlow={openCashFlowDialog}
+        />
+      )}
+
+      {viewTab === 'performance' && (
+        <PerformancePanel accounts={accounts} refreshKey={ledgerRefreshKey} />
       )}
 
       {/* Watchlist */}
@@ -2662,6 +2745,31 @@ export default function StocksPage() {
         </DialogContent>
       </Dialog>
 
+      <SellDialog
+        open={sellTarget != null}
+        target={sellTarget}
+        onOpenChange={open => { if (!open) setSellTarget(null) }}
+        onSaved={handleLedgerSaved}
+      />
+
+      <DividendDialog
+        open={dividendDialogOpen}
+        accounts={accounts}
+        stocks={stocks}
+        initialAccountId={dividendTarget.accountId}
+        initialStockId={dividendTarget.stockId}
+        onOpenChange={setDividendDialogOpen}
+        onSaved={handleLedgerSaved}
+      />
+
+      <CashFlowDialog
+        open={cashFlowDialogOpen}
+        accounts={accounts}
+        initialType={cashFlowType}
+        onOpenChange={setCashFlowDialogOpen}
+        onSaved={handleLedgerSaved}
+      />
+
       {/* Account Dialog */}
       <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}>
         <DialogContent>
@@ -2686,7 +2794,11 @@ export default function StocksPage() {
                 placeholder="0"
                 className="font-mono"
                 inputMode="decimal"
+                disabled={editAccountId != null}
               />
+              {editAccountId && (
+                <p className="mt-1 text-[11px] text-muted-foreground">后续资金变化请在“流水”中记录入金或出金，避免影响收益率计算。</p>
+              )}
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={() => setAccountDialogOpen(false)}>取消</Button>

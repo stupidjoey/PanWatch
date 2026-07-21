@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 
 from src.web.database import get_db
-from src.web.models import Account, PriceAlertRule, Position, Stock
+from src.web.models import Account, PortfolioTransaction, PriceAlertRule, Position, Stock
 from src.collectors.akshare_collector import _tencent_symbol, _fetch_tencent_quotes
 from src.collectors.market_http import TTLCache
 from src.models.market import MarketCode
@@ -213,6 +213,13 @@ def delete_account(account_id: int, db: Session = Depends(get_db)):
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(404, "账户不存在")
+
+    if (
+        db.query(PortfolioTransaction.id)
+        .filter(PortfolioTransaction.account_id == account_id)
+        .first()
+    ):
+        raise HTTPException(400, "账户已有交易流水，不能删除；可将账户设为停用")
 
     db.delete(account)
     db.commit()

@@ -26,6 +26,7 @@ from src.web.api import (
     dashboard,
     paper_trading,
     chat,
+    portfolio_ledger,
 )
 from src.web.api import factors
 from src.web.api import health
@@ -169,6 +170,12 @@ app.include_router(
     chat.router,
     prefix="/api/chat",
     tags=["chat"],
+    dependencies=protected,
+)
+app.include_router(
+    portfolio_ledger.router,
+    prefix="/api/portfolio",
+    tags=["portfolio-ledger"],
     dependencies=protected,
 )
 

@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     Index,
+    Numeric,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -131,6 +132,76 @@ class Position(Base):
 
     account = relationship("Account", back_populates="positions")
     stock = relationship("Stock", back_populates="positions")
+
+
+class PortfolioTransaction(Base):
+    """真实账户投资流水。
+
+    流水是不可变事实；当前 Position / Account.available_funds 是便于查询的投影。
+    金额统一同时保存原币种值与人民币值，当前版本的账户基础币种固定为 CNY。
+    """
+
+    __tablename__ = "portfolio_transactions"
+    __table_args__ = (
+        Index("ix_portfolio_tx_account_occurred", "account_id", "occurred_at"),
+        Index("ix_portfolio_tx_stock_occurred", "stock_id", "occurred_at"),
+        Index("ix_portfolio_tx_type_occurred", "event_type", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(
+        Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    stock_id = Column(
+        Integer, ForeignKey("stocks.id", ondelete="SET NULL"), nullable=True
+    )
+    position_id_snapshot = Column(Integer, nullable=True)
+    event_type = Column(String, nullable=False)  # SELL / DIVIDEND / DEPOSIT / WITHDRAWAL
+    stock_symbol = Column(String, default="")
+    stock_name = Column(String, default="")
+    stock_market = Column(String, default="")
+    quantity = Column(Numeric(24, 8), nullable=True)
+    unit_price = Column(Numeric(24, 8), nullable=True)
+    gross_amount = Column(Numeric(24, 8), nullable=False, default=0)
+    net_amount = Column(Numeric(24, 8), nullable=False, default=0)
+    cash_delta_base = Column(Numeric(24, 8), nullable=False, default=0)
+    cost_basis_base = Column(Numeric(24, 8), nullable=False, default=0)
+    realized_pnl_base = Column(Numeric(24, 8), nullable=False, default=0)
+    currency = Column(String, nullable=False, default="CNY")
+    fx_rate_to_base = Column(Numeric(24, 10), nullable=False, default=1)
+    occurred_at = Column(DateTime, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, server_default=func.now())
+    idempotency_key = Column(String, nullable=True, unique=True)
+    note = Column(String, default="")
+
+    account = relationship("Account")
+    stock = relationship("Stock")
+
+
+class PortfolioValuationSnapshot(Base):
+    """真实账户估值快照，供资金加权/时间加权收益计算。"""
+
+    __tablename__ = "portfolio_valuation_snapshots"
+    __table_args__ = (
+        Index("ix_portfolio_val_account_time", "account_id", "valued_at"),
+        Index("ix_portfolio_val_batch", "batch_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    batch_id = Column(String, nullable=False)
+    kind = Column(String, nullable=False, default="manual")
+    cash_value_base = Column(Numeric(24, 8), nullable=False, default=0)
+    securities_value_base = Column(Numeric(24, 8), nullable=False, default=0)
+    total_value_base = Column(Numeric(24, 8), nullable=False, default=0)
+    valuation_complete = Column(Boolean, nullable=False, default=True)
+    missing_price_count = Column(Integer, nullable=False, default=0)
+    valued_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    account = relationship("Account")
 
 
 class StockAgent(Base):
